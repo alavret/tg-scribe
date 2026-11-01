@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__tg__list_dialogs",
+      "mcp__tg__sync_chat",
+      "mcp__tg__transcribe",
+      "mcp__tg__ocr_photos",
+      "mcp__tg__fetch_media",
+      "mcp__tg__describe_photo"
+    ],
+    "ask": [
+      "mcp__tg__send_message"
+    ]
+  }
+}

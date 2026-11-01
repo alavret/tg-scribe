@@ -1,0 +1,21 @@
+[project]
+name = "tg-scribe"
+version = "0.1.0"
+description = "Local MCP server that gives AI agents access to your Telegram account on macOS"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.12"
+dependencies = [
+    "telethon",
+    "mcp",
+    "pyobjc-framework-vision>=13.0 ; sys_platform == 'darwin'",
+]
+
+[dependency-groups]
+dev = ["pytest"]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+pythonpath = ["."]

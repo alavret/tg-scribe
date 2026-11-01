@@ -1,0 +1,6 @@
+archive/
+.venv/
+__pycache__/
+.claude/worktrees/
+docs/
+.DS_Store
