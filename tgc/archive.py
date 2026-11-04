@@ -1,6 +1,9 @@
 import asyncio
+import html
+import io
 import re
 import time
+import zipfile
 from pathlib import Path
 
 from telethon.errors import FloodWaitError, RPCError
@@ -11,7 +14,10 @@ from telethon.utils import get_display_name, get_peer_id
 ARCHIVE = Path(__file__).resolve().parent.parent / "archive"
 BUDGET_S = 200  # MCP calls time out; a big chat is synced over several calls
 MAX_AUTO_VOICE = 20
-MAX_AUTO_PHOTO = 20
+MAX_AUTO_MEDIA = 20  # photos and files each
+MAX_FILE = 50_000_000
+MAX_FILE_TEXT = 2000  # chars of a file's text kept in the archive
+READABLE = {"txt", "md", "csv", "pdf", "docx", "jpg", "jpeg", "png", "heic"}
 FLUSH_EVERY = 200
 HEADER = re.compile(r"^\[[^\]]+\] #(\d+) ", re.M)
 
@@ -83,23 +89,29 @@ def update_block(path: Path, msg_id: int, fn) -> bool:
     return False
 
 
-PHOTO_TAG = re.compile(r"\[фото[^\]]*\]")
+MEDIA_TAG = re.compile(r"\[(фото|файл)(?=[ ,:\]])[^\]]*\]")
+STATE = re.compile(r"(?:, (?:с текстом|без текста|недоступно|не читается|слишком большой)|: .*)?\]$")
+PREFIX = {"фото": "[на фото]", "файл": "[в файле]"}
+PENDING = {"фото": r"\[фото\]", "файл": rf"\[файл [^\]]*\.(?i:{'|'.join(READABLE)})(?:, [\d.]+ [КМ]Б)?\]"}
 
 
-def set_photo(block: str, tag: str, lines=()) -> str:
+def set_media(block: str, state: str, lines=()) -> str:
+    """Sets the photo or file tag state (", с текстом", ": описание"…) and adds text lines below it."""
     head, _, rest = block.partition("\n")
-    if not PHOTO_TAG.search(head):
-        raise ValueError("not a photo")
     # Tags come before the text, so the first match is the tag even if the text says "[фото]".
-    return PHOTO_TAG.sub(lambda _: tag, head, count=1) + "\n" + rest + "".join(f"  [на фото] {s}\n" for s in lines)
+    m = MEDIA_TAG.search(head)
+    if not m:
+        raise ValueError("not a photo or file")
+    tag = STATE.sub("", m.group()) + state + "]"
+    return head[: m.start()] + tag + head[m.end():] + "\n" + rest + "".join(f"  {PREFIX[m.group(1)]} {s}\n" for s in lines)
 
 
-def pending_photo_ids(path: Path) -> list[int]:
-    """Photos not yet OCR'd, newest first."""
+def pending_ids(path: Path, kind: str) -> list[int]:
+    """Photos or readable files not yet processed, newest first."""
     ids = []
     for f in reversed(month_files(path)):
-        # [фото] followed only by other tags and then ": ", so a sender name may contain ": " too.
-        ids += reversed([int(i) for i in re.findall(r"^\[[^\]]+\] #(\d+) .*?\[фото\](?: \[[^\]]*\])*: ", f.read_text(), re.M)])
+        # The tag followed only by other tags and then ": ", so a sender name may contain ": " too.
+        ids += reversed([int(i) for i in re.findall(rf"^\[[^\]]+\] #(\d+) .*?{PENDING[kind]}(?: \[[^\]]*\])*: ", f.read_text(), re.M)])
     return ids
 
 
@@ -122,10 +134,72 @@ def recognize(data: bytes) -> list[str]:
     return [s for r in req.results() if (s := " ".join(r.topCandidates_(1)[0].string().split()))]
 
 
+def pdf_text(data: bytes) -> str:
+    """Text layer of a PDF via PDFKit (macOS only); a scan has none."""
+    from Foundation import NSData
+    from Quartz import PDFDocument
+
+    doc = PDFDocument.alloc().initWithData_(NSData.dataWithBytes_length_(data, len(data)))
+    if doc is None or doc.isLocked():
+        raise Unreadable("PDF")
+    return doc.string() or ""
+
+
+def extract_text(name: str, data: bytes) -> list[str]:
+    """Non-empty lines of a file's text, read locally."""
+    ext = Path(name).suffix.lower()[1:]
+    if ext in ("jpg", "jpeg", "png", "heic"):
+        return recognize(data)
+    if ext == "pdf":
+        text = pdf_text(data)
+    elif ext == "docx":
+        try:
+            with zipfile.ZipFile(io.BytesIO(data)) as z, z.open("word/document.xml") as f:
+                xml = f.read(20_000_000).decode("utf-8", "replace")  # a capped read: a zip bomb stays small
+        except (zipfile.BadZipFile, KeyError) as e:
+            raise Unreadable(f"docx: {e}") from e
+        text = "\n".join(html.unescape("".join(re.findall(r"<w:t(?:\s[^>]*)?>([^<]*)</w:t>", p))) for p in xml.split("</w:p>"))
+    else:
+        try:
+            text = data.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            text = data.decode("cp1251", "replace")
+    return [s for line in text.splitlines() if (s := " ".join(line.split()))]
+
+
+def excerpt(lines: list[str], limit=MAX_FILE_TEXT) -> list[str]:
+    out = []
+    for s in lines:
+        if len(s) > limit:
+            out.append(f"{s[:limit]} … (дальше — fetch_media)".lstrip())
+            break
+        out.append(s)
+        limit -= len(s)
+    return out
+
+
+def size_str(n: int) -> str:
+    return f"{n / 1e6:.1f} МБ" if n >= 1e6 else f"{max(1, round(n / 1e3))} КБ"
+
+
 # --- Telegram messages ---------------------------------------------------
 
 def is_voice(msg):
     return bool(msg.voice or msg.video_note)
+
+
+def is_file(msg):
+    """A document that is not a sticker, gif, video or audio."""
+    return bool(msg.document and not (msg.sticker or msg.gif or msg.video or msg.audio or is_voice(msg)))
+
+
+def media_kind(msg):
+    """"фото", "файл" for a file whose text can be read locally, else None."""
+    if msg.photo:
+        return "фото"
+    if is_file(msg) and Path(msg.file.name or "").suffix.lower()[1:] in READABLE:
+        return "файл"
+    return None
 
 
 def describe(msg, transcript=None):
@@ -150,7 +224,9 @@ def describe(msg, transcript=None):
     elif msg.contact:
         tags.append("[контакт]")
     elif msg.document:
-        tags.append(f"[файл {msg.file.name or ''}]".replace(" ]", "]"))
+        # "]" and ": " in a sender-chosen name would end the tag or fake a description.
+        name = (msg.file.name or "").replace("]", ")").replace(": ", " - ")
+        tags.append(f"[файл {', '.join(filter(None, [name, size_str(msg.file.size)]))}]")
     if msg.fwd_from:
         src = msg.forward and (msg.forward.chat or msg.forward.sender)
         tags.append(f"[переслано из «{get_display_name(src) if src else msg.fwd_from.from_name or '?'}»]")
@@ -168,20 +244,27 @@ async def transcribe_one(client, peer, msg_id):
     return None
 
 
-async def ocr_photo(client, msg):
-    """(tag, lines) for a photo; downloaded to memory only."""
+async def read_media(client, msg):
+    """(state, lines) for a photo or a readable file; downloaded to memory only."""
+    if msg.document and msg.file.size > MAX_FILE:
+        return ", слишком большой", []
+    data = await client.download_media(msg, file=bytes)
     try:
-        lines = await asyncio.to_thread(recognize, await client.download_media(msg, file=bytes))
-    except Unreadable:  # broken file on Telegram's side; retrying won't help
-        return "[фото, не читается]", []
-    return ("[фото, с текстом]", lines) if lines else ("[фото, без текста]", [])
+        if msg.photo:
+            lines = await asyncio.to_thread(recognize, data)
+        else:
+            lines = excerpt(await asyncio.to_thread(extract_text, msg.file.name, data))
+    except Unreadable:  # broken file; retrying won't help
+        return ", не читается", []
+    return (", с текстом", lines) if lines else (", без текста", [])
 
 
-async def ocr_photos(client, entity, ids=None, root=ARCHIVE):
+async def process_media(client, entity, kind, ids=None, root=ARCHIVE):
     start = time.monotonic()
+    tool, what = ("ocr_photos", "фото") if kind == "фото" else ("read_files", "файлов")
     path = chat_dir(root, get_peer_id(entity), get_display_name(entity))
-    pending = pending_photo_ids(path)
-    # Already processed photos are skipped: OCR again would duplicate lines and drop a description.
+    pending = pending_ids(path, kind)
+    # Already processed ones are skipped: processing again would duplicate lines and drop a description.
     ids = [i for i in ids if i in pending] if ids else pending
     done = failed = 0
     status = "готово"
@@ -192,25 +275,33 @@ async def ocr_photos(client, entity, ids=None, root=ARCHIVE):
                 if time.monotonic() - start > BUDGET_S:
                     raise TimeoutError
                 if not msg:
-                    update_block(path, msg_id, lambda b: set_photo(b, "[фото, недоступно]"))
+                    update_block(path, msg_id, lambda b: set_media(b, ", недоступно"))
                     continue
-                if not msg.photo:
+                if media_kind(msg) != kind:
                     continue
                 try:
-                    tag, lines = await ocr_photo(client, msg)
+                    state, lines = await read_media(client, msg)
                 except FloodWaitError:
                     raise
-                except Exception:  # left as [фото], retried on the next call
+                except Exception:  # left unprocessed, retried on the next call
                     failed += 1
                     continue
-                update_block(path, msg_id, lambda b: set_photo(b, tag, lines))
+                update_block(path, msg_id, lambda b: set_media(b, state, lines))
                 done += 1
     except TimeoutError:
-        status = "не всё, вызови ocr_photos ещё раз"
+        status = f"не всё, вызови {tool} ещё раз"
     except FloodWaitError as e:
-        status = f"Telegram просит подождать {e.seconds} с, потом вызови ocr_photos ещё раз"
-    left = len(pending_photo_ids(path))
-    return f"{status}: распознано {done}, ошибок {failed}, осталось необработанных фото {left}. Папка: {path}"
+        status = f"Telegram просит подождать {e.seconds} с, потом вызови {tool} ещё раз"
+    left = len(pending_ids(path, kind))
+    return f"{status}: обработано {done}, ошибок {failed}, осталось необработанных {what} {left}. Папка: {path}"
+
+
+async def ocr_photos(client, entity, ids=None, root=ARCHIVE):
+    return await process_media(client, entity, "фото", ids, root)
+
+
+async def read_files(client, entity, ids=None, root=ARCHIVE):
+    return await process_media(client, entity, "файл", ids, root)
 
 
 async def sync_chat(client, entity, days=None, root=ARCHIVE):
@@ -230,7 +321,8 @@ async def sync_chat(client, entity, days=None, root=ARCHIVE):
     if target is not None:
         depth.write_text(str(target))
     buf: dict[str, list[str]] = {}
-    new = old = voiced = unvoiced = photos = 0
+    new = old = voiced = unvoiced = 0
+    auto = {"фото": 0, "файл": 0}
     status = "готово"
 
     def check_budget():
@@ -261,13 +353,14 @@ async def sync_chat(client, entity, days=None, root=ARCHIVE):
                         voiced += transcript is not None
                         unvoiced += transcript is None
                     line = describe(msg, transcript)
-                    if msg.photo and photos < MAX_AUTO_PHOTO and time.monotonic() - start < BUDGET_S:
+                    kind = media_kind(msg)
+                    if kind and auto[kind] < MAX_AUTO_MEDIA and time.monotonic() - start < BUDGET_S:
                         try:
-                            line = set_photo(line, *await ocr_photo(client, msg))
-                            photos += 1
+                            line = set_media(line, *await read_media(client, msg))
+                            auto[kind] += 1
                         except FloodWaitError:
                             raise
-                        except Exception:  # left as [фото] for ocr_photos
+                        except Exception:  # left unprocessed for ocr_photos / read_files
                             pass
                     buf.setdefault(f"{msg.date.astimezone():%Y-%m}", []).append(line)
                     new += 1
@@ -277,7 +370,7 @@ async def sync_chat(client, entity, days=None, root=ARCHIVE):
             finally:
                 flush(append)
         if target is not None:
-            # Old history is not transcribed or OCR'd: that is done lazily, when a task needs it.
+            # Old history is not transcribed, OCR'd or read: that is done lazily, when a task needs it.
             try:
                 async for msg in client.iter_messages(entity, max_id=first_id, wait_time=1):
                     if msg.date.timestamp() < target:
@@ -298,6 +391,7 @@ async def sync_chat(client, entity, days=None, root=ARCHIVE):
         status = f"Telegram просит подождать {e.seconds} с, потом вызови sync_chat ещё раз"
 
     voice = f", голосовых расшифровано {voiced}, не расшифровано {unvoiced}" if voiced or unvoiced else ""
-    ocr = f", фото распознано {photos}" if photos else ""
+    ocr = f", фото распознано {auto['фото']}" if auto["фото"] else ""
+    ocr += f", файлов прочитано {auto['файл']}" if auto["файл"] else ""
     older = f", старых {old}" if old else ""
     return f"{status}: новых сообщений {new}{older}{voice}{ocr}. Папка: {path}"
