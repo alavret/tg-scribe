@@ -150,11 +150,14 @@ def textutil(data: bytes, ext: str) -> str:
     with tempfile.TemporaryDirectory() as d:
         src = Path(d) / f"in.{ext}"
         src.write_bytes(data)
+        # A Word binary must parse as one: unforced, textutil falls back to plain text and returns mojibake.
+        # shortcut: other binary junk named .doc still comes back as mojibake; sniff more formats if that shows up.
+        fmt = ["-format", "doc"] if data.startswith(b"\xd0\xcf\x11\xe0") else []
         try:
-            r = subprocess.run(["textutil", "-convert", "txt", "-stdout", str(src)], capture_output=True, timeout=60)
+            r = subprocess.run(["textutil", *fmt, "-convert", "txt", "-stdout", str(src)], capture_output=True, timeout=60)
         except subprocess.TimeoutExpired as e:  # a file that hangs textutil would hang every retry too
             raise Unreadable("textutil: timeout") from e
-    if r.returncode:
+    if r.returncode or (r.stderr.strip() and not r.stdout.strip()):  # textutil can exit 0 on a read error
         raise Unreadable(f"textutil: {r.stderr.decode('utf-8', 'replace').strip()}")
     return r.stdout.decode("utf-8", "replace")
 

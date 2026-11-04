@@ -168,7 +168,9 @@ def test_recognize():
 def test_extract_text_macos():
     assert extract_text("a.rtf", rb"{\rtf1\ansi Hello\par World}") == (["Hello", "World"], "")
     with pytest.raises(Unreadable):
-        extract_text("a.doc", b"not a doc")
+        extract_text("a.doc", b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1 broken word file")
+    with pytest.raises(Unreadable):
+        extract_text("a.rtf", b"not an rtf")
     with pytest.raises(Unreadable):
         extract_text("a.pdf", b"not a pdf")
 
