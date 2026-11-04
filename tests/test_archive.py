@@ -1,5 +1,6 @@
 import asyncio
 import io
+import subprocess
 import sys
 import zipfile
 from datetime import datetime, timedelta, timezone
@@ -298,3 +299,21 @@ def test_download_large_resumes(tmp_path, monkeypatch):
     assert client.offsets == [0, 1000, 2000] and out.endswith(".part") is False
     assert [p.name for p in tmp_path.iterdir()] == [Path(out.split(": ")[1]).name]
     assert Path(out.split(": ")[1]).read_bytes() == data
+
+
+def test_textutil_timeout_is_unreadable(monkeypatch):
+    def hang(*args, **kwargs):
+        raise subprocess.TimeoutExpired("textutil", 60)
+
+    monkeypatch.setattr("tgc.archive.subprocess.run", hang)
+    with pytest.raises(Unreadable):  # marked "не читается" instead of retried on every call
+        extract_text("a.doc", b"...")
+
+
+def test_sync_does_not_count_big_file_as_read(tmp_path):
+    user, chat = User(id=1, first_name="Иван"), FakeChat(1)
+    asyncio.run(sync_chat(chat, user, root=tmp_path))
+    now = datetime.now(timezone.utc)
+    chat.msgs += [doc_msg(2, "big.pdf", size=60_000_000, date=now), doc_msg(3, "a.txt", date=now)]
+    out = asyncio.run(sync_chat(chat, user, root=tmp_path))
+    assert "файлов прочитано 1" in out and chat.downloads == 1  # a.txt only

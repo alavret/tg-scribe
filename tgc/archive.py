@@ -150,7 +150,10 @@ def textutil(data: bytes, ext: str) -> str:
     with tempfile.TemporaryDirectory() as d:
         src = Path(d) / f"in.{ext}"
         src.write_bytes(data)
-        r = subprocess.run(["textutil", "-convert", "txt", "-stdout", str(src)], capture_output=True, timeout=60)
+        try:
+            r = subprocess.run(["textutil", "-convert", "txt", "-stdout", str(src)], capture_output=True, timeout=60)
+        except subprocess.TimeoutExpired as e:  # a file that hangs textutil would hang every retry too
+            raise Unreadable("textutil: timeout") from e
     if r.returncode:
         raise Unreadable(f"textutil: {r.stderr.decode('utf-8', 'replace').strip()}")
     return r.stdout.decode("utf-8", "replace")
@@ -382,8 +385,9 @@ async def sync_chat(client, entity, days=None, root=ARCHIVE):
                     kind = media_kind(msg)
                     if kind and auto[kind] < MAX_AUTO_MEDIA and time.monotonic() - start < BUDGET_S:
                         try:
-                            line = set_media(line, *await read_media(client, msg, path))
-                            auto[kind] += 1
+                            state, lines = await read_media(client, msg, path)
+                            line = set_media(line, state, lines)
+                            auto[kind] += state != ", слишком большой"  # not downloaded, so not read
                         except FloodWaitError:
                             raise
                         except Exception:  # left unprocessed for ocr_photos / read_files
