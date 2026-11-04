@@ -312,6 +312,24 @@ async def read_files(client, entity, ids=None, root=ARCHIVE):
     return await process_media(client, entity, "файл", ids, root)
 
 
+async def download_large(client, msg, folder: Path) -> str:
+    """Downloads a file of any size to disk over several calls: each one resumes the .part file."""
+    start = time.monotonic()
+    dest = folder / f"{msg.id}{msg.file.ext or ''}"
+    if dest.exists():
+        return f"#{msg.id}: {dest}"
+    part = dest.with_name(dest.name + ".part")
+    done = part.stat().st_size if part.exists() else 0
+    with open(part, "ab") as f:
+        async for chunk in client.iter_download(msg.media, offset=done):
+            f.write(chunk)
+            done += len(chunk)
+            if done < msg.file.size and time.monotonic() - start > BUDGET_S:
+                return f"#{msg.id}: скачано {size_str(done)} из {size_str(msg.file.size)}, вызови fetch_large_file ещё раз"
+    part.rename(dest)
+    return f"#{msg.id}: {dest}"
+
+
 async def sync_chat(client, entity, days=None, root=ARCHIVE):
     """New messages first, then older history down to the target depth, newest first:
     an interrupted load leaves a gap-free archive that ends at the present."""

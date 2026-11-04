@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from tgc.archive import (
-    HEADER, Unreadable, append, chat_dir, describe, extract_text, format_line, id_range, month_files, ocr_photos,
+    HEADER, Unreadable, append, chat_dir, describe, download_large, extract_text, format_line, id_range, month_files, ocr_photos,
     pending_ids, read_files, recognize, set_media, sync_chat, update_block,
 )
 from telethon.tl.types import (
@@ -276,3 +276,25 @@ def test_read_files(tmp_path, monkeypatch):
     assert (path / "text" / "1.txt").read_text() == "строка 1\nстрока 2\n" and not (path / "text" / "4.txt").exists()
     assert "[файл gone.txt, 1 КБ, недоступно]" in text and "[файл big.txt, 60.0 МБ, слишком большой]" in text
     assert "[файл scan.pdf, 1 КБ, 3 стр., без текста]" in text
+
+
+def test_download_large_resumes(tmp_path, monkeypatch):
+    data = bytes(range(256)) * 10
+
+    class Client:
+        offsets = []
+
+        async def iter_download(self, media, offset=0):
+            self.offsets.append(offset)
+            for i in range(offset, len(data), 1000):
+                yield data[i : i + 1000]
+
+    msg = doc_msg(7, "big.zip", size=len(data))
+    monkeypatch.setattr("tgc.archive.BUDGET_S", -1)  # every call stops after one chunk
+    client = Client()
+    assert "вызови fetch_large_file ещё раз" in asyncio.run(download_large(client, msg, tmp_path))
+    assert "ещё раз" in asyncio.run(download_large(client, msg, tmp_path))
+    out = asyncio.run(download_large(client, msg, tmp_path))
+    assert client.offsets == [0, 1000, 2000] and out.endswith(".part") is False
+    assert [p.name for p in tmp_path.iterdir()] == [Path(out.split(": ")[1]).name]
+    assert Path(out.split(": ")[1]).read_bytes() == data

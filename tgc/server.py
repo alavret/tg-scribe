@@ -5,7 +5,7 @@ from telethon.utils import get_display_name, get_peer_id
 
 from mcp.server.mcpserver import MCPServer
 from tgc.archive import (
-    ARCHIVE, MAX_FILE, chat_dir, describe, is_file, is_voice, ocr_photos as ocr, read_files as read, set_media, size_str,
+    ARCHIVE, MAX_FILE, chat_dir, describe, download_large, is_file, is_voice, ocr_photos as ocr, read_files as read, set_media, size_str,
     sync_chat as sync, transcribe_one, update_block,
 )
 from tgc.client import resolve, search, telegram
@@ -29,7 +29,8 @@ INSTRUCTIONS = f"""Telegram пользователя: его личные чат
   fetch_media, посмотри файл, затем сохрани короткое описание через describe_media.
 - Файлы: [файл отчёт.pdf, 2.3 МБ] у txt, md, csv, pdf, doc, docx, rtf и картинок — не прочитан; [файл …, с текстом] —
   весь текст лежит в <папка чата>/text/<id>.txt, [файл …, без текста] (например, скан PDF),
-  [файл …: описание], [файл …, недоступно], [файл …, не читается], [файл …, слишком большой] — больше 50 МБ.
+  [файл …: описание], [файл …, недоступно], [файл …, не читается], [файл …, слишком большой] — больше 50 МБ:
+  его скачивает только fetch_large_file. Сначала спроси пользователя, назови файл и размер.
   У прочитанного PDF в теге есть число страниц: [файл отчёт.pdf, 2.3 МБ, 12 стр., с текстом].
   Новые файлы читаются при sync_chat, файлы из истории — нет. Нужен поиск по тексту файлов —
   сначала read_files, затем grep по папке text.
@@ -120,10 +121,24 @@ async def fetch_media(chat: str, ids: list[int]) -> str:
                 out.append(f"#{msg_id}: не фото и не файл")
                 continue
             if msg.document and msg.file.size > MAX_FILE:
-                out.append(f"#{msg_id}: {size_str(msg.file.size)}, больше 50 МБ, не скачан")
+                out.append(f"#{msg_id}: {size_str(msg.file.size)}, больше 50 МБ, не скачан: это делает fetch_large_file")
                 continue
             out.append(f"#{msg_id}: {await client.download_media(msg, file=str(media / str(msg_id)))}")
     return "\n".join(out)
+
+
+@mcp.tool()
+async def fetch_large_file(chat: str, id: int) -> str:
+    """Скачивает файл больше 50 МБ (без видео и аудио) в папку чата в архиве и возвращает путь.
+    Только после того, как пользователь согласился. Файл качается частями: если ответ «вызови ещё раз» — повтори."""
+    async with telegram() as client:
+        entity = await resolve(client, chat)
+        msg = await client.get_messages(entity, ids=id)
+        if not msg or not is_file(msg):
+            return f"#{id}: не файл"
+        media = chat_dir(ARCHIVE, get_peer_id(entity), get_display_name(entity)) / "media"
+        media.mkdir(exist_ok=True)
+        return await download_large(client, msg, media)
 
 
 @mcp.tool()

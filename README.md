@@ -30,6 +30,7 @@ The server runs on your Mac and connects to Telegram as you, over the official M
 | `read_files` | Reads the text of txt, md, csv, pdf, doc, docx, rtf and image files locally on your Mac and saves its beginning to the archive |
 | `fetch_media` | Downloads a photo or a file up to 50 MB so the agent can look at it. Videos and audio are not downloaded |
 | `describe_media` | Saves a short description of a photo or a file to the archive |
+| `fetch_large_file` | Downloads a file over 50 MB after you confirm it. A big file is downloaded over several calls |
 | `send_message` | Sends a message after you confirm it |
 
 ### How it works in practice
@@ -183,12 +184,12 @@ claude mcp add tg --scope user -- uv run --directory /path/to/tg-scribe python -
 
 The archive still lives in `archive/` next to the MCP source code.
 
-The project's `.claude/settings.json` rule that asks before sending does not apply in other folders. Add it to `~/.claude/settings.json`:
+The project's `.claude/settings.json` rules that ask before sending and before downloading big files do not apply in other folders. Add them to `~/.claude/settings.json`:
 
 ```json
 {
   "permissions": {
-    "ask": ["mcp__tg__send_message"]
+    "ask": ["mcp__tg__send_message", "mcp__tg__fetch_large_file"]
   }
 }
 ```
@@ -200,6 +201,8 @@ Ask the agent: "Show my recent Telegram chats". It calls `list_dialogs` and show
 ## Permissions
 
 The agent sends a message only after you confirm it. In Claude Code, `.claude/settings.json` takes care of this: it allows reading, saving and recognizing chats without asking, and sets an `ask` rule on sending. Claude Code shows the text and the chat every time and waits for your "yes". Do not move `send_message` to `allow`.
+
+`fetch_large_file` works the same way, through `ask`: a file over 50 MB is downloaded only if you agree. This keeps the agent from filling the disk and spending time on a file you do not need.
 
 The rule works only in the project folder. For other folders, add it to `~/.claude/settings.json` as described in step 5. In other agents, set up confirmation for `send_message` the same way.
 
