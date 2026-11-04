@@ -39,3 +39,4 @@ def test_fetch_media_refuses_over_50_mb(tmp_path, monkeypatch):
     out = asyncio.run(server.fetch_media("Иван", [1, 2]))
     assert downloads == [2]
     assert "#1: 60.0 МБ, больше 50 МБ, не скачан" in out
+    assert f"#2: {tmp_path / 'Иван__1' / 'media' / '2_2.pdf'}" in out  # the original name is kept

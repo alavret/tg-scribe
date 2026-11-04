@@ -5,8 +5,10 @@ import re
 import subprocess
 import tempfile
 import time
+import xml.etree.ElementTree as ET
 import zipfile
-from pathlib import Path
+from html.parser import HTMLParser
+from pathlib import Path, PurePosixPath
 
 from telethon.errors import FloodWaitError, RPCError
 from telethon.tl.functions.messages import TranscribeAudioRequest
@@ -18,7 +20,9 @@ BUDGET_S = 200  # MCP calls time out; a big chat is synced over several calls
 MAX_AUTO_VOICE = 20
 MAX_AUTO_MEDIA = 20  # photos and files each
 MAX_FILE = 50_000_000
-READABLE = {"txt", "md", "csv", "pdf", "docx", "doc", "rtf", "jpg", "jpeg", "png", "heic"}
+MAX_AUTO_FILE = 10_000_000  # sync_chat leaves bigger files to read_files: a sync stays within its time budget
+MAX_OCR_PAGES = 50
+READABLE = {"txt", "md", "csv", "html", "htm", "pdf", "docx", "doc", "rtf", "xlsx", "pptx", "jpg", "jpeg", "png", "heic"}
 FLUSH_EVERY = 200
 HEADER = re.compile(r"^\[[^\]]+\] #(\d+) ", re.M)
 
@@ -91,18 +95,24 @@ def update_block(path: Path, msg_id: int, fn) -> bool:
 
 
 MEDIA_TAG = re.compile(r"\[(фото|файл)(?=[ ,:\]])[^\]]*\]")
-STATE = re.compile(r"(?:, (?:с текстом|без текста|недоступно|не читается|слишком большой)|: .*)?\]$")
-PENDING = {"фото": r"\[фото\]", "файл": rf"\[файл [^\]]*\.(?i:{'|'.join(READABLE)})(?:, [\d.]+ [КМ]Б)?\]"}
+STATE = re.compile(r"(, (?:с текстом|без текста|недоступно|не читается|слишком большой))?(: .*)?\]$")
+DESC = r"(?:: [^\]]*)?"
+# A description does not count as processed: the file is still read and the photo still OCR'd.
+# The file name part has no ": ", so a description ending in ".pdf" does not look like a name.
+PENDING = {"фото": rf"\[фото{DESC}\]", "файл": rf"\[файл (?:(?!: )[^\]])*\.(?i:{'|'.join(READABLE)})(?:, [\d.]+ [КМ]Б)?{DESC}\]"}
 
 
 def set_media(block: str, state: str, lines=()) -> str:
-    """Sets the photo or file tag state (", с текстом", ": описание"…) and adds text lines below it."""
+    """Sets the photo or file tag state (", с текстом"…) or description (": описание"), keeping the other one,
+    and adds text lines below it."""
     head, _, rest = block.partition("\n")
     # Tags come before the text, so the first match is the tag even if the text says "[фото]".
     m = MEDIA_TAG.search(head)
     if not m:
         raise ValueError("not a photo or file")
-    tag = STATE.sub("", m.group()) + state + "]"
+    s = STATE.search(m.group())
+    old_state, old_desc = s.group(1) or "", s.group(2) or ""
+    tag = m.group()[: s.start()] + (old_state + state if state.startswith(": ") else state + old_desc) + "]"
     return head[: m.start()] + tag + head[m.end():] + "\n" + rest + "".join(f"  [на фото] {s}\n" for s in lines)
 
 
@@ -134,15 +144,32 @@ def recognize(data: bytes) -> list[str]:
     return [s for r in req.results() if (s := " ".join(r.topCandidates_(1)[0].string().split()))]
 
 
-def pdf_text(data: bytes) -> tuple[str, int]:
-    """(text layer, page count) of a PDF via PDFKit (macOS only); a scan has no text."""
-    from Foundation import NSData
+# Terminal escape codes, control characters and U+FFFC, PDFKit's placeholder for an image.
+JUNK = re.compile(r"\x1b\[[\d;?=]*[A-Za-z]|[\x00-\x08\x0e-\x1f\x7f\ufffc]")
+
+
+def pdf_text(data: bytes) -> tuple[str, str]:
+    """(text, tag info such as ", 12 стр., скан") of a PDF via PDFKit (macOS only).
+    A page without a text layer is a scan: it is rendered and read with Apple Vision."""
+    from Foundation import NSData, NSMakeSize
     from Quartz import PDFDocument
 
     doc = PDFDocument.alloc().initWithData_(NSData.dataWithBytes_length_(data, len(data)))
     if doc is None or doc.isLocked():
         raise Unreadable("PDF")
-    return doc.string() or "", doc.pageCount()
+    pages, ocr = [], 0
+    for i in range(doc.pageCount()):
+        page = doc.pageAtIndex_(i)
+        text = JUNK.sub("", page.string() or "")
+        # shortcut: pages past MAX_OCR_PAGES stay unread; raise it or OCR on demand if long scans show up.
+        if not text.strip() and ocr < MAX_OCR_PAGES:
+            size = page.boundsForBox_(0).size  # kPDFDisplayBoxMediaBox
+            scale = min(3, 3000 / max(size.width, size.height, 1))  # ~200 dpi, but a huge page stays a sane image
+            img = page.thumbnailOfSize_forBox_(NSMakeSize(size.width * scale, size.height * scale), 0)
+            text = "\n".join(recognize(bytes(img.TIFFRepresentation())))
+            ocr += 1
+        pages.append(text)
+    return "\n".join(pages), f", {doc.pageCount()} стр." + (", скан" if ocr else "")
 
 
 def textutil(data: bytes, ext: str) -> str:
@@ -162,29 +189,126 @@ def textutil(data: bytes, ext: str) -> str:
     return r.stdout.decode("utf-8", "replace")
 
 
+def zip_part(z: zipfile.ZipFile, name: str) -> str:
+    with z.open(name) as f:
+        return f.read(20_000_000).decode("utf-8", "replace")  # a capped read: a zip bomb stays small
+
+
+def runs(el) -> str:
+    """Text of an Office XML paragraph or cell; a line break becomes a space."""
+    return "".join((t.text or "") if t.tag.endswith("}t") else " " for t in el.iter() if t.tag.endswith(("}t", "}br")))
+
+
+def linked_parts(z: zipfile.ZipFile, main: str, tag: str) -> list[tuple[str, str]]:
+    """(name, part path) of the sheets of a workbook or the slides of a deck, in their order."""
+    folder, _, file = main.rpartition("/")
+    targets = {r.get("Id"): r.get("Target") for r in ET.fromstring(zip_part(z, f"{folder}/_rels/{file}.rels"))}
+    out = []
+    for el in ET.fromstring(zip_part(z, main)).iterfind(f".//{{*}}{tag}"):
+        target = targets[next(v for k, v in el.attrib.items() if k.endswith("}id"))]
+        path = target[1:] if target.startswith("/") else f"{folder}/{target}"
+        out.append((el.get("name"), str(PurePosixPath(*[p for p in path.split("/") if p != "."]))))
+    return out
+
+
+def xlsx_text(z: zipfile.ZipFile) -> str:
+    """One line per row, cells joined with " | ".
+    shortcut: dates come out as Excel day numbers and empty cells are dropped; read styles if that matters."""
+    try:
+        shared = [runs(si) for si in ET.fromstring(zip_part(z, "xl/sharedStrings.xml")).iterfind(".//{*}si")]
+    except KeyError:  # a workbook with no text cells has no shared strings
+        shared = []
+    out = []
+    for name, part in linked_parts(z, "xl/workbook.xml", "sheet"):
+        out.append(f"## Лист «{name}»")
+        for row in ET.fromstring(zip_part(z, part)).iterfind(".//{*}row"):
+            cells = []
+            for c in row.iterfind(".//{*}c"):
+                v = c.find("{*}v")
+                if c.get("t") == "inlineStr":
+                    cells.append(runs(c))
+                elif v is not None:
+                    cells.append(shared[int(v.text)] if c.get("t") == "s" else v.text or "")
+            out.append(" | ".join(s for c in cells if (s := " ".join(c.split()))))
+    return "\n".join(out)
+
+
+def pptx_text(z: zipfile.ZipFile) -> str:
+    out = []
+    for i, (_, part) in enumerate(linked_parts(z, "ppt/presentation.xml", "sldId"), 1):
+        out.append(f"## Слайд {i}")
+        out += [runs(p) for p in ET.fromstring(zip_part(z, part)).iterfind(".//{*}p")]
+    return "\n".join(out)
+
+
+def office_text(ext: str, data: bytes) -> str:
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as z:
+            if ext == "xlsx":
+                return xlsx_text(z)
+            if ext == "pptx":
+                return pptx_text(z)
+            xml = zip_part(z, "word/document.xml")
+    except (zipfile.BadZipFile, KeyError, StopIteration, ValueError, IndexError, ET.ParseError) as e:
+        raise Unreadable(f"{ext}: {e!r}") from e
+    return "\n".join(html.unescape("".join(re.findall(r"<w:t(?:\s[^>]*)?>([^<]*)</w:t>", p))) for p in xml.split("</w:p>"))
+
+
+class HTMLText(HTMLParser):
+    """Visible text of an HTML page; parsed, not rendered, so nothing is loaded from the network."""
+    SKIP = {"script", "style", "noscript", "template", "svg"}
+    BLOCK = {"br", "p", "div", "li", "tr", "title", "h1", "h2", "h3", "h4", "h5", "h6", "table", "section", "article",
+             "header", "footer", "pre", "blockquote", "dt", "dd"}
+
+    def __init__(self):
+        super().__init__()
+        self.out, self.skip = [], 0
+
+    def handle_starttag(self, tag, attrs):
+        self.skip += tag in self.SKIP
+        self.out.append("\n" if tag in self.BLOCK else " | " if tag in ("td", "th") else "")
+
+    def handle_endtag(self, tag):
+        self.skip -= tag in self.SKIP and self.skip > 0
+        self.out.append("\n" if tag in self.BLOCK else "")
+
+    def handle_data(self, data):
+        if not self.skip:
+            self.out.append(data)
+
+
+def html_text(text: str) -> str:
+    parser = HTMLText()
+    parser.feed(text)
+    parser.close()
+    return "".join(parser.out)
+
+
+def decode(data: bytes) -> str:
+    if data.startswith((b"\xff\xfe", b"\xfe\xff")):  # UTF-16, as Windows tools and Excel export "Unicode text"
+        return data.decode("utf-16", "replace")
+    try:
+        return data.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return data.decode("cp1251", "replace")
+
+
 def extract_text(name: str, data: bytes) -> tuple[list[str], str]:
     """(non-empty lines of a file's text, read locally; extra tag info such as ", 12 стр.")."""
     ext, info = Path(name).suffix.lower()[1:], ""
     if ext in ("jpg", "jpeg", "png", "heic"):
         return recognize(data), info
     if ext == "pdf":
-        text, pages = pdf_text(data)
-        info = f", {pages} стр."
+        text, info = pdf_text(data)
     elif ext in ("doc", "rtf"):
         text = textutil(data, ext)
-    elif ext == "docx":
-        try:
-            with zipfile.ZipFile(io.BytesIO(data)) as z, z.open("word/document.xml") as f:
-                xml = f.read(20_000_000).decode("utf-8", "replace")  # a capped read: a zip bomb stays small
-        except (zipfile.BadZipFile, KeyError) as e:
-            raise Unreadable(f"docx: {e}") from e
-        text = "\n".join(html.unescape("".join(re.findall(r"<w:t(?:\s[^>]*)?>([^<]*)</w:t>", p))) for p in xml.split("</w:p>"))
+    elif ext in ("docx", "xlsx", "pptx"):
+        text = office_text(ext, data)
+    elif ext in ("html", "htm"):
+        text = html_text(decode(data))
     else:
-        try:
-            text = data.decode("utf-8-sig")
-        except UnicodeDecodeError:
-            text = data.decode("cp1251", "replace")
-    return [s for line in text.splitlines() if (s := " ".join(line.split()))], info
+        text = decode(data)
+    return [s for line in JUNK.sub("", text).splitlines() if (s := " ".join(line.split()))], info
 
 
 def size_str(n: int) -> str:
@@ -278,7 +402,7 @@ async def process_media(client, entity, kind, ids=None, root=ARCHIVE):
     tool, what = ("ocr_photos", "фото") if kind == "фото" else ("read_files", "файлов")
     path = chat_dir(root, get_peer_id(entity), get_display_name(entity))
     pending = pending_ids(path, kind)
-    # Already processed ones are skipped: processing again would duplicate lines and drop a description.
+    # Already processed ones are skipped: processing again would duplicate the text lines.
     ids = [i for i in ids if i in pending] if ids else pending
     done = failed = 0
     status = "готово"
@@ -318,10 +442,16 @@ async def read_files(client, entity, ids=None, root=ARCHIVE):
     return await process_media(client, entity, "файл", ids, root)
 
 
+def media_file(folder: Path, msg) -> Path:
+    """<id>_<original name>: the id keeps names unique, the name tells the user which file it is."""
+    name = Path((msg.file.name or "").replace("\\", "/")).name.lstrip(".")[-100:]  # 100 chars stay under 255 bytes
+    return folder / (f"{msg.id}_{name}" if name else f"{msg.id}{msg.file.ext or ''}")
+
+
 async def download_large(client, msg, folder: Path) -> str:
     """Downloads a file of any size to disk over several calls: each one resumes the .part file."""
     start = time.monotonic()
-    dest = folder / f"{msg.id}{msg.file.ext or ''}"
+    dest = media_file(folder, msg)
     if dest.exists():
         return f"#{msg.id}: {dest}"
     part = dest.with_name(dest.name + ".part")
@@ -386,7 +516,8 @@ async def sync_chat(client, entity, days=None, root=ARCHIVE):
                         unvoiced += transcript is None
                     line = describe(msg, transcript)
                     kind = media_kind(msg)
-                    if kind and auto[kind] < MAX_AUTO_MEDIA and time.monotonic() - start < BUDGET_S:
+                    later = msg.document and MAX_AUTO_FILE < msg.file.size <= MAX_FILE  # left for read_files
+                    if kind and not later and auto[kind] < MAX_AUTO_MEDIA and time.monotonic() - start < BUDGET_S:
                         try:
                             state, lines = await read_media(client, msg, path)
                             line = set_media(line, state, lines)

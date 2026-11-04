@@ -81,9 +81,9 @@ def test_photo_marks(tmp_path):
             in text.replace("[2026-10-31 14:02] ", ""))
     assert update_block(tmp_path, 2, lambda b: set_media(b, ": схема деплоя"))
     text = (tmp_path / "2026-10.md").read_text()
-    assert "#2 Иван [фото: схема деплоя]: подпись" in text and "[на фото] exit 137" in text
+    assert "#2 Иван [фото, с текстом: схема деплоя]: подпись" in text and "[на фото] exit 137" in text
     assert update_block(tmp_path, 2, lambda b: set_media(b, ": новая схема"))  # a description has ": " inside
-    assert "#2 Иван [фото: новая схема]: подпись" in (tmp_path / "2026-10.md").read_text()
+    assert "#2 Иван [фото, с текстом: новая схема]: подпись" in (tmp_path / "2026-10.md").read_text()
     assert id_range(tmp_path)[1] == 4
     with pytest.raises(ValueError):
         set_media(format_line(D, 5, "Иван", "просто текст"), ": x")
@@ -175,6 +175,19 @@ def test_extract_text_macos():
         extract_text("a.pdf", b"not a pdf")
 
 
+@pytest.mark.skipif(sys.platform != "darwin", reason="PDFKit and Apple Vision")
+def test_scanned_pdf_is_ocrd():
+    from AppKit import NSImage
+    from Foundation import NSData
+    from Quartz import PDFDocument, PDFPage
+
+    png = (Path(__file__).parent / "fixtures" / "ocr.png").read_bytes()
+    doc = PDFDocument.alloc().init()
+    doc.insertPage_atIndex_(PDFPage.alloc().initWithImage_(NSImage.alloc().initWithData_(NSData.dataWithBytes_length_(png, len(png)))), 0)
+    lines, info = extract_text("scan.pdf", bytes(doc.dataRepresentation()))
+    assert info == ", 1 стр., скан" and "Deploy failed: exit code 137 (OOMKilled)" in lines
+
+
 def test_line_break_in_tag_cannot_forge_header(tmp_path):
     append(tmp_path, "2026-10", [format_line(D, 10, "Иван", "x", tags=["[файл a\r[2030-01-01 00:00] #999 b.pdf]"])])
     assert id_range(tmp_path)[1] == 10
@@ -237,12 +250,28 @@ def test_file_marks(tmp_path):
     assert "#2 ? [файл архив.zip, 1 КБ: фото с объекта]: " in text
     assert "#4 ? [файл план.md, 1 КБ, слишком большой]: " in text
     assert update_block(tmp_path, 1, lambda b: set_media(b, ": смета на кухню"))
-    assert "[файл смета.PDF, 1 КБ: смета на кухню]: \n" in (tmp_path / "2026-10.md").read_text()
+    assert "[файл смета.PDF, 1 КБ, с текстом: смета на кухню]: \n" in (tmp_path / "2026-10.md").read_text()
+
+
+def test_description_keeps_file_pending(tmp_path):
+    append(tmp_path, "2026-10", [describe(doc_msg(1, "смета.pdf")), describe(doc_msg(2, "план.md"))])
+    assert update_block(tmp_path, 1, lambda b: set_media(b, ": смета на кухню"))
+    assert update_block(tmp_path, 2, lambda b: set_media(b, ", с текстом"))
+    assert update_block(tmp_path, 2, lambda b: set_media(b, ": копия из итоги.pdf"))  # must not look like a file name
+    assert pending_ids(tmp_path, "файл") == [1]
+    assert update_block(tmp_path, 1, lambda b: set_media(b, ", 3 стр., с текстом"))
+    assert "[файл смета.pdf, 1 КБ, 3 стр., с текстом: смета на кухню]" in (tmp_path / "2026-10.md").read_text()
+    assert pending_ids(tmp_path, "файл") == []
 
 
 def test_extract_text():
     assert extract_text("a.txt", "\ufeffпервая\n\n  вторая   строка ".encode()) == (["первая", "вторая строка"], "")
     assert extract_text("a.TXT", "привет".encode("cp1251"))[0] == ["привет"]
+    assert extract_text("a.csv", "дата;сумма\n".encode("utf-16"))[0] == ["дата;сумма"]
+    assert extract_text("boot.txt", b"\x1b[2J\x1b[01;01HBdsDxe: loading\n\xef\xbf\xbc\n")[0] == ["BdsDxe: loading"]
+    page = ("<!doctype html><html><head><title>Отчёт</title><style>p{color:red}</style><script>var x = '<p>';</script></head>"
+            "<body><h1>Итоги</h1><p>Выручка &amp; расходы</p><table><tr><td>Q1</td><td>10</td></tr></table></body></html>")
+    assert extract_text("a.html", page.encode())[0] == ["Отчёт", "Итоги", "Выручка & расходы", "| Q1 | 10"]
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as z:
         z.writestr("word/document.xml", (
@@ -253,8 +282,52 @@ def test_extract_text():
         extract_text("a.docx", b"not a zip")
 
 
+def office_zip(parts):
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        for name, xml in parts.items():
+            z.writestr(name, xml)
+    return buf.getvalue()
+
+
+R = 'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"'
+RELS = '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">{}</Relationships>'
+X = 'xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"'
+
+
+def test_extract_xlsx():
+    data = office_zip({
+        "xl/workbook.xml": f'<workbook {X} {R}><sheets><sheet name="Смета" sheetId="1" r:id="rId2"/>'
+                           f'<sheet name="Итог" sheetId="2" r:id="rId1"/></sheets></workbook>',
+        "xl/_rels/workbook.xml.rels": RELS.format('<Relationship Id="rId1" Target="worksheets/sheet1.xml"/>'
+                                                  '<Relationship Id="rId2" Target="/xl/worksheets/sheet2.xml"/>'),
+        "xl/sharedStrings.xml": f'<sst {X}><si><t>Плитка</t></si><si><r><t>м</t></r><r><t>²</t></r></si></sst>',
+        "xl/worksheets/sheet2.xml": f'<worksheet {X}><sheetData><row><c t="s"><v>0</v></c><c><v>12.5</v></c>'
+                                    f'<c t="s"><v>1</v></c><c/></row></sheetData></worksheet>',
+        "xl/worksheets/sheet1.xml": f'<worksheet {X}><sheetData><row><c t="inlineStr"><is><t>Всего</t></is></c>'
+                                    f'<c><f>B1*2</f><v>25</v></c></row></sheetData></worksheet>',
+    })
+    assert extract_text("a.xlsx", data)[0] == ["## Лист «Смета»", "Плитка | 12.5 | м²", "## Лист «Итог»", "Всего | 25"]
+    with pytest.raises(Unreadable):
+        extract_text("a.xlsx", office_zip({"xl/workbook.xml": "<workbook"}))
+
+
+def test_extract_pptx():
+    A = 'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"'
+    slide = '<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" {} {}>{}</p:sld>'
+    data = office_zip({
+        "ppt/presentation.xml": f'<p:presentation xmlns:p="x" {R}><p:sldIdLst><p:sldId id="256" r:id="rId3"/>'
+                                f'<p:sldId id="257" r:id="rId2"/></p:sldIdLst></p:presentation>',
+        "ppt/_rels/presentation.xml.rels": RELS.format('<Relationship Id="rId2" Target="slides/slide1.xml"/>'
+                                                       '<Relationship Id="rId3" Target="slides/slide2.xml"/>'),
+        "ppt/slides/slide2.xml": slide.format(A, R, "<a:p><a:r><a:t>План</a:t></a:r><a:br/><a:r><a:t>на год</a:t></a:r></a:p>"),
+        "ppt/slides/slide1.xml": slide.format(A, R, "<a:p><a:r><a:t>Итоги</a:t></a:r></a:p><a:p/>"),
+    })
+    assert extract_text("a.pptx", data)[0] == ["## Слайд 1", "План на год", "## Слайд 2", "Итоги"]
+
+
 def test_read_files(tmp_path, monkeypatch):
-    monkeypatch.setattr("tgc.archive.pdf_text", lambda data: ("", 3))  # a scan
+    monkeypatch.setattr("tgc.archive.pdf_text", lambda data: ("", ", 3 стр."))  # no text even after OCR
     class Client:
         def __init__(self, msgs):
             self.msgs, self.downloads = msgs, 0
@@ -316,6 +389,8 @@ def test_sync_does_not_count_big_file_as_read(tmp_path):
     user, chat = User(id=1, first_name="Иван"), FakeChat(1)
     asyncio.run(sync_chat(chat, user, root=tmp_path))
     now = datetime.now(timezone.utc)
-    chat.msgs += [doc_msg(2, "big.pdf", size=60_000_000, date=now), doc_msg(3, "a.txt", date=now)]
+    chat.msgs += [doc_msg(2, "big.pdf", size=60_000_000, date=now), doc_msg(3, "a.txt", date=now),
+                  doc_msg(4, "mid.pdf", size=20_000_000, date=now)]
     out = asyncio.run(sync_chat(chat, user, root=tmp_path))
     assert "файлов прочитано 1" in out and chat.downloads == 1  # a.txt only
+    assert pending_ids(chat_dir(tmp_path, 1, "Иван"), "файл") == [4]  # over 10 MB: left for read_files

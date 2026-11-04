@@ -27,8 +27,8 @@ The server runs on your Mac and connects to Telegram as you, over the official M
 | `sync_chat` | Saves a chat to the archive: the last N days or the whole history. Later calls add new messages |
 | `transcribe` | Transcribes voice and video messages. Needs Telegram Premium |
 | `ocr_photos` | Reads text on photos with Apple Vision, locally on your Mac |
-| `read_files` | Reads the text of txt, md, csv, pdf, doc, docx, rtf and image files locally on your Mac and saves its beginning to the archive |
-| `fetch_media` | Downloads a photo or a file up to 50 MB so the agent can look at it. Videos and audio are not downloaded |
+| `read_files` | Reads the text of txt, md, csv, html, pdf, doc, docx, rtf, xlsx, pptx and image files locally on your Mac, including scanned PDFs, and saves it to `text/<id>.txt` in the chat folder |
+| `fetch_media` | Downloads a photo or a file up to 50 MB so the agent can look at it. Files keep their names: `<id>_<name>`. Videos and audio are not downloaded |
 | `describe_media` | Saves a short description of a photo or a file to the archive |
 | `fetch_large_file` | Downloads a file over 50 MB after you confirm it. A big file is downloaded over several calls |
 | `send_message` | Sends a message after you confirm it |
@@ -39,7 +39,7 @@ The server runs on your Mac and connects to Telegram as you, over the official M
 2. The agent calls `sync_chat` with `days=21`. The server saves three weeks of messages to the archive, newest first.
 3. The agent searches the archive. An important voice message is marked as not transcribed, so the agent transcribes it with `transcribe`. It needs the numbers from a photo of an estimate, so it reads the text with `ocr_photos`.
 4. The agent answers and cites message ids.
-5. Next day you ask: "Anything new?" `sync_chat` loads only new messages. It transcribes and reads their voice messages, photos and files right away, up to 20 of each per call.
+5. Next day you ask: "Anything new?" `sync_chat` loads only new messages. It transcribes and reads their voice messages, photos and files up to 10 MB right away, up to 20 of each per call. Bigger files wait for `read_files`.
 6. You ask: "And what did we decide last month?" The agent calls `sync_chat` with `days=60`, and the server loads the missing older history.
 
 Voice messages, photos and files from older history are not processed while loading. The agent transcribes and reads them only when a task needs them. That is why loading takes minutes, not hours, and does not use up limits.
@@ -85,11 +85,12 @@ What each part means:
 | `[фото: …]` | Photo description saved by the agent |
 | `[фото, недоступно]` | Photo was deleted from Telegram |
 | `[фото, не читается]` | Photo file is broken |
-| `[файл report.pdf, 2.3 МБ]` | File. For txt, md, csv, pdf, doc, docx, rtf and images: not read yet |
+| `[файл report.pdf, 2.3 МБ]` | File. For txt, md, csv, html, pdf, doc, docx, rtf, xlsx, pptx and images: not read yet |
 | `[файл …, с текстом]` | The full text of the file is in `text/<id>.txt` in the chat folder, not in the month file: the agent spends no tokens on it until the file is needed |
-| `[файл …, без текста]` | The file has no text, for example a scanned PDF |
+| `[файл …, без текста]` | The file has no text |
 | `[файл …, 12 стр., …]` | PDF page count, added once the file is read |
-| `[файл …: …]` | File description saved by the agent |
+| `[файл …, скан, …]` | Some PDF pages were scans: their text was read with Apple Vision and may have errors |
+| `[файл …: …]`, `[файл …, с текстом: …]` | File description saved by the agent. It does not replace the state: an unread file is still read by `read_files` |
 | `[файл …, недоступно]`, `[файл …, не читается]` | File was deleted from Telegram or is broken |
 | `[файл …, слишком большой]` | File is over 50 MB, the server does not download it |
 | `[видео]`, `[стикер 👍]`, `[gif]`, `[опрос]`, `[геопозиция]`, `[контакт]` | Video, sticker, GIF, poll, location, contact |
