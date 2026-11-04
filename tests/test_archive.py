@@ -173,6 +173,7 @@ def test_extract_text_macos():
         extract_text("a.doc", b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1 broken word file")
     with pytest.raises(Unreadable):
         extract_text("a.rtf", b"not an rtf")
+    assert extract_text("a.doc", "просто текст".encode())[0] == ["просто текст"]
     with pytest.raises(Unreadable):
         extract_text("a.pdf", b"not a pdf")
 
@@ -280,6 +281,10 @@ def test_extract_text():
             "<w:body><w:p><w:r><w:t>Смета</w:t></w:r><w:r><w:tab/><w:t xml:space=\"preserve\"> на &amp; </w:t></w:r>"
             "<w:r><w:t>кухню</w:t></w:r></w:p><w:p></w:p><w:p><w:r><w:t>Итого</w:t></w:r></w:p></w:body>"))
     assert extract_text("a.docx", buf.getvalue())[0] == ["Смета на & кухню", "Итого"]
+    assert extract_text("a.doc", buf.getvalue())[0] == ["Смета на & кухню", "Итого"]  # a docx saved as .doc
+    assert extract_text("a.doc", "\ufeff<html><body><p>Привет</p></body></html>".encode())[0] == ["Привет"]
+    with pytest.raises(Unreadable):  # binary junk is not read as text
+        extract_text("a.doc", b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR")
     with pytest.raises(Unreadable):
         extract_text("a.docx", b"not a zip")
 

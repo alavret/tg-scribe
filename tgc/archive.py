@@ -22,6 +22,7 @@ MAX_AUTO_MEDIA = 20  # photos and files each
 MAX_FILE = 50_000_000
 MAX_AUTO_FILE = 10_000_000  # sync_chat leaves bigger files to read_files: a sync stays within its time budget
 MAX_OCR_PAGES = 50
+WORD_BINARY = b"\xd0\xcf\x11\xe0"  # the OLE2 signature of a .doc from Word 97–2003
 READABLE = {"txt", "md", "csv", "html", "htm", "pdf", "docx", "doc", "rtf", "xlsx", "pptx", "jpg", "jpeg", "png", "heic"}
 FLUSH_EVERY = 200
 HEADER = re.compile(r"^\[[^\]]+\] #(\d+) ", re.M)
@@ -178,8 +179,7 @@ def textutil(data: bytes, ext: str) -> str:
         src = Path(d) / f"in.{ext}"
         src.write_bytes(data)
         # A Word binary must parse as one: unforced, textutil falls back to plain text and returns mojibake.
-        # shortcut: other binary junk named .doc still comes back as mojibake; sniff more formats if that shows up.
-        fmt = ["-format", "doc"] if data.startswith(b"\xd0\xcf\x11\xe0") else []
+        fmt = ["-format", "doc"] if data.startswith(WORD_BINARY) else []
         try:
             r = subprocess.run(["textutil", *fmt, "-convert", "txt", "-stdout", str(src)], capture_output=True, timeout=60)
         except subprocess.TimeoutExpired as e:  # a file that hangs textutil would hang every retry too
@@ -300,6 +300,13 @@ def extract_text(name: str, data: bytes) -> tuple[list[str], str]:
         return recognize(data), info
     if ext == "pdf":
         text, info = pdf_text(data)
+    # A .doc is often something else: Word saves docx, web pages and plain text under that name too.
+    elif ext == "doc" and data.startswith(b"PK"):
+        text = office_text("docx", data)
+    elif ext == "doc" and data.lstrip(b"\xef\xbb\xbf \t\r\n")[:1] == b"<":  # textutil guesses its charset wrong
+        text = html_text(decode(data))
+    elif ext == "doc" and not data.startswith(WORD_BINARY) and b"\x00" in data[:8192]:
+        raise Unreadable("doc: binary, but not a Word file")  # textutil would read it as text: mojibake
     elif ext in ("doc", "rtf"):
         text = textutil(data, ext)
     elif ext in ("docx", "xlsx", "pptx"):
