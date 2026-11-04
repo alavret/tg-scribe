@@ -88,6 +88,8 @@ def test_photo_marks(tmp_path):
     with pytest.raises(ValueError):
         set_media(format_line(D, 5, "Иван", "просто текст"), ": x")
     assert "Ivan: work [фото, без текста]" in set_media(format_line(D, 6, "Ivan: work", "", tags=["[фото]"]), ", без текста")
+    append(tmp_path, "2026-10", [format_line(D, 7, "Иван", "", tags=["[фото: схема]"])])  # described before states were kept
+    assert pending_ids(tmp_path, "фото") == [1]  # OCR again would duplicate its [на фото] lines
 
 
 def test_ocr_photos_skips_processed(tmp_path):

@@ -82,7 +82,7 @@ What each part means:
 | `[фото]` | Photo not processed yet |
 | `[фото, с текстом]` | Photo has text, shown in the `[на фото]` lines below |
 | `[фото, без текста]` | Photo has no text |
-| `[фото: …]` | Photo description saved by the agent |
+| `[фото: …]`, `[фото, с текстом: …]` | Photo description saved by the agent |
 | `[фото, недоступно]` | Photo was deleted from Telegram |
 | `[фото, не читается]` | Photo file is broken |
 | `[файл report.pdf, 2.3 МБ]` | File. For txt, md, csv, html, pdf, doc, docx, rtf, xlsx, pptx and images: not read yet |

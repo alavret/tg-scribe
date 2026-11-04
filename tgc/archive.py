@@ -96,10 +96,10 @@ def update_block(path: Path, msg_id: int, fn) -> bool:
 
 MEDIA_TAG = re.compile(r"\[(фото|файл)(?=[ ,:\]])[^\]]*\]")
 STATE = re.compile(r"(, (?:с текстом|без текста|недоступно|не читается|слишком большой))?(: .*)?\]$")
-DESC = r"(?:: [^\]]*)?"
-# A description does not count as processed: the file is still read and the photo still OCR'd.
+# A described file is still read: its text goes to text/<id>.txt, so reading is safe to repeat. A described photo
+# is not OCR'd: before descriptions kept the state, "[фото: …]" could already have "[на фото]" lines, and OCR would add them twice.
 # The file name part has no ": ", so a description ending in ".pdf" does not look like a name.
-PENDING = {"фото": rf"\[фото{DESC}\]", "файл": rf"\[файл (?:(?!: )[^\]])*\.(?i:{'|'.join(READABLE)})(?:, [\d.]+ [КМ]Б)?{DESC}\]"}
+PENDING = {"фото": r"\[фото\]", "файл": rf"\[файл (?:(?!: )[^\]])*\.(?i:{'|'.join(READABLE)})(?:, [\d.]+ [КМ]Б)?(?:: [^\]]*)?\]"}
 
 
 def set_media(block: str, state: str, lines=()) -> str:
