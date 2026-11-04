@@ -45,7 +45,7 @@ Voice messages, photos and files from older history are not processed while load
 
 ## Archive
 
-Chats are stored in the `archive/` folder next to the MCP source code, one file per month. The folder is in `.gitignore`.
+Chats are stored in the `archive/` folder next to the MCP source code, one file per month. The text of read files is in the `text/` subfolder of each chat. The folder is in `.gitignore`.
 
 ```
 archive/Ivan-Petrov__123456789/2026-10.md
@@ -64,8 +64,6 @@ One line per message. The tags are in Russian. Sample file:
   15% in November
 [2026-10-31 14:10] #48218 Ivan Petrov: [кружок 0:35, не расшифровано]
 [2026-10-31 14:12] #48219 Ivan Petrov [файл contract.docx, 48 КБ, с текстом]: please sign
-  [в файле] Construction contract No. 17
-  [в файле] Deadline: December 15, 2026
 ```
 
 What each part means:
@@ -87,7 +85,7 @@ What each part means:
 | `[фото, недоступно]` | Photo was deleted from Telegram |
 | `[фото, не читается]` | Photo file is broken |
 | `[файл report.pdf, 2.3 МБ]` | File. For txt, md, csv, pdf, doc, docx, rtf and images: not read yet |
-| `[файл …, с текстом]` | The beginning of the file's text, up to 2000 characters, is in the `[в файле]` lines below |
+| `[файл …, с текстом]` | The full text of the file is in `text/<id>.txt` in the chat folder, not in the month file: the agent spends no tokens on it until the file is needed |
 | `[файл …, без текста]` | The file has no text, for example a scanned PDF |
 | `[файл …, 12 стр., …]` | PDF page count, added once the file is read |
 | `[файл …: …]` | File description saved by the agent |

@@ -18,7 +18,6 @@ BUDGET_S = 200  # MCP calls time out; a big chat is synced over several calls
 MAX_AUTO_VOICE = 20
 MAX_AUTO_MEDIA = 20  # photos and files each
 MAX_FILE = 50_000_000
-MAX_FILE_TEXT = 2000  # chars of a file's text kept in the archive
 READABLE = {"txt", "md", "csv", "pdf", "docx", "doc", "rtf", "jpg", "jpeg", "png", "heic"}
 FLUSH_EVERY = 200
 HEADER = re.compile(r"^\[[^\]]+\] #(\d+) ", re.M)
@@ -93,7 +92,6 @@ def update_block(path: Path, msg_id: int, fn) -> bool:
 
 MEDIA_TAG = re.compile(r"\[(фото|файл)(?=[ ,:\]])[^\]]*\]")
 STATE = re.compile(r"(?:, (?:с текстом|без текста|недоступно|не читается|слишком большой)|: .*)?\]$")
-PREFIX = {"фото": "[на фото]", "файл": "[в файле]"}
 PENDING = {"фото": r"\[фото\]", "файл": rf"\[файл [^\]]*\.(?i:{'|'.join(READABLE)})(?:, [\d.]+ [КМ]Б)?\]"}
 
 
@@ -105,7 +103,7 @@ def set_media(block: str, state: str, lines=()) -> str:
     if not m:
         raise ValueError("not a photo or file")
     tag = STATE.sub("", m.group()) + state + "]"
-    return head[: m.start()] + tag + head[m.end():] + "\n" + rest + "".join(f"  {PREFIX[m.group(1)]} {s}\n" for s in lines)
+    return head[: m.start()] + tag + head[m.end():] + "\n" + rest + "".join(f"  [на фото] {s}\n" for s in lines)
 
 
 def pending_ids(path: Path, kind: str) -> list[int]:
@@ -183,17 +181,6 @@ def extract_text(name: str, data: bytes) -> tuple[list[str], str]:
     return [s for line in text.splitlines() if (s := " ".join(line.split()))], info
 
 
-def excerpt(lines: list[str], limit=MAX_FILE_TEXT) -> list[str]:
-    out = []
-    for s in lines:
-        if len(s) > limit:
-            out.append(f"{s[:limit]} … (дальше — fetch_media)".lstrip())
-            break
-        out.append(s)
-        limit -= len(s)
-    return out
-
-
 def size_str(n: int) -> str:
     return f"{n / 1e6:.1f} МБ" if n >= 1e6 else f"{max(1, round(n / 1e3))} КБ"
 
@@ -260,19 +247,24 @@ async def transcribe_one(client, peer, msg_id):
     return None
 
 
-async def read_media(client, msg):
-    """(state, lines) for a photo or a readable file; downloaded to memory only."""
+async def read_media(client, msg, path):
+    """(state, lines) for a photo or a readable file; downloaded to memory only.
+    A file's text goes to text/<id>.txt, not to the archive: the agent reads the archive on every task."""
     if msg.document and msg.file.size > MAX_FILE:
         return ", слишком большой", []
     data = await client.download_media(msg, file=bytes)
     try:
         if msg.photo:
-            lines, info = await asyncio.to_thread(recognize, data), ""
-        else:
-            lines, info = await asyncio.to_thread(extract_text, msg.file.name, data)
+            lines = await asyncio.to_thread(recognize, data)
+            return (", с текстом", lines) if lines else (", без текста", [])
+        lines, info = await asyncio.to_thread(extract_text, msg.file.name, data)
     except Unreadable:  # broken file; retrying won't help
         return ", не читается", []
-    return (f"{info}, с текстом", excerpt(lines)) if lines else (f"{info}, без текста", [])
+    if not lines:
+        return f"{info}, без текста", []
+    (path / "text").mkdir(exist_ok=True)
+    (path / "text" / f"{msg.id}.txt").write_text("\n".join(lines) + "\n")
+    return f"{info}, с текстом", []
 
 
 async def process_media(client, entity, kind, ids=None, root=ARCHIVE):
@@ -296,7 +288,7 @@ async def process_media(client, entity, kind, ids=None, root=ARCHIVE):
                 if media_kind(msg) != kind:
                     continue
                 try:
-                    state, lines = await read_media(client, msg)
+                    state, lines = await read_media(client, msg, path)
                 except FloodWaitError:
                     raise
                 except Exception:  # left unprocessed, retried on the next call
@@ -372,7 +364,7 @@ async def sync_chat(client, entity, days=None, root=ARCHIVE):
                     kind = media_kind(msg)
                     if kind and auto[kind] < MAX_AUTO_MEDIA and time.monotonic() - start < BUDGET_S:
                         try:
-                            line = set_media(line, *await read_media(client, msg))
+                            line = set_media(line, *await read_media(client, msg, path))
                             auto[kind] += 1
                         except FloodWaitError:
                             raise

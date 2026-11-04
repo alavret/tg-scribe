@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from tgc.archive import (
-    HEADER, Unreadable, append, chat_dir, describe, excerpt, extract_text, format_line, id_range, month_files, ocr_photos,
+    HEADER, Unreadable, append, chat_dir, describe, extract_text, format_line, id_range, month_files, ocr_photos,
     pending_ids, read_files, recognize, set_media, sync_chat, update_block,
 )
 from telethon.tl.types import (
@@ -225,16 +225,16 @@ def test_file_marks(tmp_path):
         describe(Message(5, PeerUser(1), D, "", media=photo)),
     ])
     assert pending_ids(tmp_path, "файл") == [4, 3, 1] and pending_ids(tmp_path, "фото") == [5]
-    assert update_block(tmp_path, 1, lambda b: set_media(b, ", с текстом", ["Итого: 120 000 ₽"]))
+    assert update_block(tmp_path, 1, lambda b: set_media(b, ", с текстом"))
     assert update_block(tmp_path, 4, lambda b: set_media(b, ", слишком большой"))
     assert update_block(tmp_path, 2, lambda b: set_media(b, ": фото с объекта"))
     assert pending_ids(tmp_path, "файл") == [3]
     text = (tmp_path / "2026-10.md").read_text().replace("[2026-10-31 14:02] ", "")
-    assert "#1 ? [файл смета.PDF, 1 КБ, с текстом]: \n  [в файле] Итого: 120 000 ₽\n" in text
+    assert "#1 ? [файл смета.PDF, 1 КБ, с текстом]: \n" in text
     assert "#2 ? [файл архив.zip, 1 КБ: фото с объекта]: " in text
     assert "#4 ? [файл план.md, 1 КБ, слишком большой]: " in text
     assert update_block(tmp_path, 1, lambda b: set_media(b, ": смета на кухню"))
-    assert "[файл смета.PDF, 1 КБ: смета на кухню]: \n  [в файле] Итого" in (tmp_path / "2026-10.md").read_text()
+    assert "[файл смета.PDF, 1 КБ: смета на кухню]: \n" in (tmp_path / "2026-10.md").read_text()
 
 
 def test_extract_text():
@@ -248,9 +248,6 @@ def test_extract_text():
     assert extract_text("a.docx", buf.getvalue())[0] == ["Смета на & кухню", "Итого"]
     with pytest.raises(Unreadable):
         extract_text("a.docx", b"not a zip")
-    assert excerpt(["abc", "defg", "h"], limit=5) == ["abc", "de … (дальше — fetch_media)"]
-    assert excerpt(["abc", "de", "f"], limit=5) == ["abc", "de", "… (дальше — fetch_media)"]
-    assert excerpt(["abc"], limit=5) == ["abc"]
 
 
 def test_read_files(tmp_path, monkeypatch):
@@ -275,6 +272,7 @@ def test_read_files(tmp_path, monkeypatch):
     assert "осталось необработанных файлов 0" in asyncio.run(read_files(client, user, root=tmp_path))
     assert client.downloads == 2  # the big file is not downloaded
     text = (path / "2026-10.md").read_text()
-    assert "[файл a.txt, 1 КБ, с текстом]: \n  [в файле] строка 1\n  [в файле] строка 2\n" in text
+    assert "[файл a.txt, 1 КБ, с текстом]: \n[" in text  # the text is not in the archive
+    assert (path / "text" / "1.txt").read_text() == "строка 1\nстрока 2\n" and not (path / "text" / "4.txt").exists()
     assert "[файл gone.txt, 1 КБ, недоступно]" in text and "[файл big.txt, 60.0 МБ, слишком большой]" in text
     assert "[файл scan.pdf, 1 КБ, 3 стр., без текста]" in text
