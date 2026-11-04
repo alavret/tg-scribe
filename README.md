@@ -27,7 +27,7 @@ The server runs on your Mac and connects to Telegram as you, over the official M
 | `sync_chat` | Saves a chat to the archive: the last N days or the whole history. Later calls add new messages |
 | `transcribe` | Transcribes voice and video messages. Needs Telegram Premium |
 | `ocr_photos` | Reads text on photos with Apple Vision, locally on your Mac |
-| `read_files` | Reads the text of txt, md, csv, pdf, docx and image files locally on your Mac and saves its beginning to the archive |
+| `read_files` | Reads the text of txt, md, csv, pdf, doc, docx, rtf and image files locally on your Mac and saves its beginning to the archive |
 | `fetch_media` | Downloads a photo or a file up to 50 MB so the agent can look at it. Videos and audio are not downloaded |
 | `describe_media` | Saves a short description of a photo or a file to the archive |
 | `send_message` | Sends a message after you confirm it |
@@ -86,9 +86,10 @@ What each part means:
 | `[фото: …]` | Photo description saved by the agent |
 | `[фото, недоступно]` | Photo was deleted from Telegram |
 | `[фото, не читается]` | Photo file is broken |
-| `[файл report.pdf, 2.3 МБ]` | File. For txt, md, csv, pdf, docx and images: not read yet |
+| `[файл report.pdf, 2.3 МБ]` | File. For txt, md, csv, pdf, doc, docx, rtf and images: not read yet |
 | `[файл …, с текстом]` | The beginning of the file's text, up to 2000 characters, is in the `[в файле]` lines below |
 | `[файл …, без текста]` | The file has no text, for example a scanned PDF |
+| `[файл …, 12 стр., …]` | PDF page count, added once the file is read |
 | `[файл …: …]` | File description saved by the agent |
 | `[файл …, недоступно]`, `[файл …, не читается]` | File was deleted from Telegram or is broken |
 | `[файл …, слишком большой]` | File is over 50 MB, the server does not download it |

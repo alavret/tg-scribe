@@ -163,6 +163,15 @@ def test_recognize():
     assert lines == ["Встреча перенесена на 14:30 в четверг", "Deploy failed: exit code 137 (OOMKilled)"]
 
 
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS textutil and PDFKit")
+def test_extract_text_macos():
+    assert extract_text("a.rtf", rb"{\rtf1\ansi Hello\par World}") == (["Hello", "World"], "")
+    with pytest.raises(Unreadable):
+        extract_text("a.doc", b"not a doc")
+    with pytest.raises(Unreadable):
+        extract_text("a.pdf", b"not a pdf")
+
+
 def test_line_break_in_tag_cannot_forge_header(tmp_path):
     append(tmp_path, "2026-10", [format_line(D, 10, "Иван", "x", tags=["[файл a\r[2030-01-01 00:00] #999 b.pdf]"])])
     assert id_range(tmp_path)[1] == 10
@@ -229,14 +238,14 @@ def test_file_marks(tmp_path):
 
 
 def test_extract_text():
-    assert extract_text("a.txt", "﻿первая\n\n  вторая   строка ".encode()) == ["первая", "вторая строка"]
-    assert extract_text("a.TXT", "привет".encode("cp1251")) == ["привет"]
+    assert extract_text("a.txt", "\ufeffпервая\n\n  вторая   строка ".encode()) == (["первая", "вторая строка"], "")
+    assert extract_text("a.TXT", "привет".encode("cp1251"))[0] == ["привет"]
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as z:
         z.writestr("word/document.xml", (
             "<w:body><w:p><w:r><w:t>Смета</w:t></w:r><w:r><w:tab/><w:t xml:space=\"preserve\"> на &amp; </w:t></w:r>"
             "<w:r><w:t>кухню</w:t></w:r></w:p><w:p></w:p><w:p><w:r><w:t>Итого</w:t></w:r></w:p></w:body>"))
-    assert extract_text("a.docx", buf.getvalue()) == ["Смета на & кухню", "Итого"]
+    assert extract_text("a.docx", buf.getvalue())[0] == ["Смета на & кухню", "Итого"]
     with pytest.raises(Unreadable):
         extract_text("a.docx", b"not a zip")
     assert excerpt(["abc", "defg", "h"], limit=5) == ["abc", "de … (дальше — fetch_media)"]
@@ -244,7 +253,8 @@ def test_extract_text():
     assert excerpt(["abc"], limit=5) == ["abc"]
 
 
-def test_read_files(tmp_path):
+def test_read_files(tmp_path, monkeypatch):
+    monkeypatch.setattr("tgc.archive.pdf_text", lambda data: ("", 3))  # a scan
     class Client:
         def __init__(self, msgs):
             self.msgs, self.downloads = msgs, 0
@@ -259,10 +269,12 @@ def test_read_files(tmp_path):
     user = User(id=1, first_name="Иван")
     path = chat_dir(tmp_path, 1, "Иван")
     big = doc_msg(3, "big.txt", size=60_000_000)
-    append(path, "2026-10", [describe(doc_msg(1, "a.txt")), describe(doc_msg(2, "gone.txt")), describe(big)])
-    client = Client({1: doc_msg(1, "a.txt"), 3: big})
+    pdf = doc_msg(4, "scan.pdf")
+    append(path, "2026-10", [describe(doc_msg(1, "a.txt")), describe(doc_msg(2, "gone.txt")), describe(big), describe(pdf)])
+    client = Client({1: doc_msg(1, "a.txt"), 3: big, 4: pdf})
     assert "осталось необработанных файлов 0" in asyncio.run(read_files(client, user, root=tmp_path))
-    assert client.downloads == 1  # the big file is not downloaded
+    assert client.downloads == 2  # the big file is not downloaded
     text = (path / "2026-10.md").read_text()
     assert "[файл a.txt, 1 КБ, с текстом]: \n  [в файле] строка 1\n  [в файле] строка 2\n" in text
     assert "[файл gone.txt, 1 КБ, недоступно]" in text and "[файл big.txt, 60.0 МБ, слишком большой]" in text
+    assert "[файл scan.pdf, 1 КБ, 3 стр., без текста]" in text

@@ -2,6 +2,8 @@ import asyncio
 import html
 import io
 import re
+import subprocess
+import tempfile
 import time
 import zipfile
 from pathlib import Path
@@ -17,7 +19,7 @@ MAX_AUTO_VOICE = 20
 MAX_AUTO_MEDIA = 20  # photos and files each
 MAX_FILE = 50_000_000
 MAX_FILE_TEXT = 2000  # chars of a file's text kept in the archive
-READABLE = {"txt", "md", "csv", "pdf", "docx", "jpg", "jpeg", "png", "heic"}
+READABLE = {"txt", "md", "csv", "pdf", "docx", "doc", "rtf", "jpg", "jpeg", "png", "heic"}
 FLUSH_EVERY = 200
 HEADER = re.compile(r"^\[[^\]]+\] #(\d+) ", re.M)
 
@@ -134,24 +136,38 @@ def recognize(data: bytes) -> list[str]:
     return [s for r in req.results() if (s := " ".join(r.topCandidates_(1)[0].string().split()))]
 
 
-def pdf_text(data: bytes) -> str:
-    """Text layer of a PDF via PDFKit (macOS only); a scan has none."""
+def pdf_text(data: bytes) -> tuple[str, int]:
+    """(text layer, page count) of a PDF via PDFKit (macOS only); a scan has no text."""
     from Foundation import NSData
     from Quartz import PDFDocument
 
     doc = PDFDocument.alloc().initWithData_(NSData.dataWithBytes_length_(data, len(data)))
     if doc is None or doc.isLocked():
         raise Unreadable("PDF")
-    return doc.string() or ""
+    return doc.string() or "", doc.pageCount()
 
 
-def extract_text(name: str, data: bytes) -> list[str]:
-    """Non-empty lines of a file's text, read locally."""
-    ext = Path(name).suffix.lower()[1:]
+def textutil(data: bytes, ext: str) -> str:
+    """doc and rtf via macOS textutil; it reads files only, so the data goes to a temp file."""
+    with tempfile.TemporaryDirectory() as d:
+        src = Path(d) / f"in.{ext}"
+        src.write_bytes(data)
+        r = subprocess.run(["textutil", "-convert", "txt", "-stdout", str(src)], capture_output=True, timeout=60)
+    if r.returncode:
+        raise Unreadable(f"textutil: {r.stderr.decode('utf-8', 'replace').strip()}")
+    return r.stdout.decode("utf-8", "replace")
+
+
+def extract_text(name: str, data: bytes) -> tuple[list[str], str]:
+    """(non-empty lines of a file's text, read locally; extra tag info such as ", 12 стр.")."""
+    ext, info = Path(name).suffix.lower()[1:], ""
     if ext in ("jpg", "jpeg", "png", "heic"):
-        return recognize(data)
+        return recognize(data), info
     if ext == "pdf":
-        text = pdf_text(data)
+        text, pages = pdf_text(data)
+        info = f", {pages} стр."
+    elif ext in ("doc", "rtf"):
+        text = textutil(data, ext)
     elif ext == "docx":
         try:
             with zipfile.ZipFile(io.BytesIO(data)) as z, z.open("word/document.xml") as f:
@@ -164,7 +180,7 @@ def extract_text(name: str, data: bytes) -> list[str]:
             text = data.decode("utf-8-sig")
         except UnicodeDecodeError:
             text = data.decode("cp1251", "replace")
-    return [s for line in text.splitlines() if (s := " ".join(line.split()))]
+    return [s for line in text.splitlines() if (s := " ".join(line.split()))], info
 
 
 def excerpt(lines: list[str], limit=MAX_FILE_TEXT) -> list[str]:
@@ -251,12 +267,12 @@ async def read_media(client, msg):
     data = await client.download_media(msg, file=bytes)
     try:
         if msg.photo:
-            lines = await asyncio.to_thread(recognize, data)
+            lines, info = await asyncio.to_thread(recognize, data), ""
         else:
-            lines = excerpt(await asyncio.to_thread(extract_text, msg.file.name, data))
+            lines, info = await asyncio.to_thread(extract_text, msg.file.name, data)
     except Unreadable:  # broken file; retrying won't help
         return ", не читается", []
-    return (", с текстом", lines) if lines else (", без текста", [])
+    return (f"{info}, с текстом", excerpt(lines)) if lines else (f"{info}, без текста", [])
 
 
 async def process_media(client, entity, kind, ids=None, root=ARCHIVE):
