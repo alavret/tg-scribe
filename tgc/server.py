@@ -1,5 +1,6 @@
 import logging
 
+from telethon.errors import RPCError
 from telethon.tl.functions.messages import GetDialogFiltersRequest
 from telethon.tl.types import User
 from telethon.utils import get_display_name, get_peer_id
@@ -56,45 +57,53 @@ logging.getLogger("telethon").setLevel(logging.WARNING)  # one INFO line per pho
 @mcp.tool(annotations=READ)
 async def list_dialogs(query: str | None = None, folder: str | None = None) -> str:
     """Чаты пользователя: id, тип, непрочитанные, папки, название.
-    Без query — 50 последних чатов (с folder — до 500); с query — поиск по названию или имени среди всех чатов.
+    Без query — 50 последних чатов (с folder — все чаты этой папки); с query — поиск по названию или имени среди всех чатов.
     folder — оставить только чаты этой папки (достаточно части названия, например "pers")."""
     async with telegram() as client:
-        folders = await folder_index(client)
+        folders = await folder_list(client)
+        if folder:
+            wanted = {f[0] for f in folders if folder.lower() in f[0].lower()}
+            if not wanted:
+                return f"папка «{folder}» не найдена. Папки: " + (", ".join(f[0] for f in folders) or "нет")
         if query:
             rows = [(e, "-") for e in await search(client, query)]
-        else:
-            rows = [(d.entity, d.unread_count) for d in await client.get_dialogs(limit=500 if folder else 50)]
-        if folder:
-            wanted = {t for ts in folders.values() for t in ts if folder.lower() in t.lower()}
-            if not wanted:
-                names = sorted({t for ts in folders.values() for t in ts})
-                return f"папка «{folder}» не найдена. Папки: " + (", ".join(names) or "нет")
-            rows = [(e, unread) for e, unread in rows if wanted & set(folders.get(get_peer_id(e), ()))]
-    lines = [
-        f"{get_peer_id(e)}\t{kind(e)}\t{unread}\t{', '.join(folders.get(get_peer_id(e), ())) or '-'}\t{get_display_name(e)}"
-        for e, unread in rows
-    ]
+        else:  # a folder chat can be far below the 50 most recent ones
+            rows = [(d.entity, d.unread_count) for d in await client.get_dialogs(limit=None if folder else 50)]
+    rows = [(e, unread, folders_of(e, folders)) for e, unread in rows]
+    if folder:
+        rows = [r for r in rows if wanted & set(r[2])]
+    lines = [f"{get_peer_id(e)}\t{kind(e)}\t{unread}\t{', '.join(names) or '-'}\t{get_display_name(e)}" for e, unread, names in rows]
     return "id\tтип\tнепрочитанные\tпапки\tназвание\n" + ("\n".join(lines) or "ничего не найдено")
 
 
-async def folder_index(client) -> dict[int, list[str]]:
-    """peer_id → названия папок чата. Сервер не заполняет dialog.folder_id у обычных папок,
-    поэтому принадлежность берём из явных списков чатов каждой папки (include/pinned peers)."""
-    index: dict[int, list[str]] = {}
+async def folder_list(client) -> list[tuple[str, set[int], set[int], object]]:
+    """Папки: (название, явно добавленные чаты, исключённые чаты, сама папка с правилами).
+    Сервер не заполняет dialog.folder_id у обычных папок, поэтому состав считаем сами."""
     try:
         filters = (await client(GetDialogFiltersRequest())).filters
-    except Exception:
-        return index  # список папок недоступен — чаты покажутся без папок
+    except RPCError:
+        return []  # список папок недоступен — чаты покажутся без папок
+    out = []
     for f in filters:
         title = getattr(getattr(f, "title", None), "text", None)
         if not title:
-            continue  # «Все чаты» и служебные
-        peers = list(getattr(f, "include_peers", None) or []) + list(getattr(f, "pinned_peers", None) or [])
-        for peer in peers:
-            names = index.setdefault(get_peer_id(peer), [])
-            if title not in names:
-                names.append(title)
-    return index
+            continue  # «Все чаты»
+        ids = [{await client.get_peer_id(p) for p in getattr(f, attr, None) or ()}  # get_peer_id here knows InputPeerSelf
+               for attr in ("include_peers", "pinned_peers", "exclude_peers")]
+        out.append((title, ids[0] | ids[1], ids[2], f))
+    return out
+
+
+def folders_of(entity, folders) -> list[str]:
+    """Папки чата: явно добавлен или подходит под правила папки (контакты, группы, каналы...) и не исключён.
+    shortcut: exclude_muted/exclude_read/exclude_archived не учитываются — нужны данные диалога, а не только чата."""
+    pid = get_peer_id(entity)
+    if isinstance(entity, User):
+        rule = "bots" if entity.bot else "contacts" if entity.contact else "non_contacts"
+    else:
+        rule = "broadcasts" if getattr(entity, "broadcast", False) else "groups"
+    return [title for title, include, exclude, f in folders
+            if pid in include or (pid not in exclude and getattr(f, rule, None))]
 
 
 def kind(entity):
@@ -211,9 +220,12 @@ async def forward_messages(chat: str, ids: list[int], to: str) -> str:
         src = await resolve(client, chat)
         dst = await resolve(client, to)
         msgs = await client.forward_messages(dst, ids, from_peer=src)
-    if not isinstance(msgs, list):
-        msgs = [msgs]
-    return f"Переслано в «{get_display_name(dst)}»: " + ", ".join(f"#{m.id}" for m in msgs)
+    # Telethon puts None in place of a message it could not forward (deleted, service): the rest are already sent
+    out = f"Переслано в «{get_display_name(dst)}»: " + (", ".join(f"#{m.id}" for m in msgs if m) or "ничего")
+    skipped = [f"#{i}" for i, m in zip(ids, msgs) if not m]
+    if skipped:
+        out += ". Не пересланы (удалены или недоступны), повторять их не нужно: " + ", ".join(skipped)
+    return out
 
 
 if __name__ == "__main__":
