@@ -2,9 +2,9 @@
 
 English | [Русский](README.ru.md)
 
-A local MCP server for macOS that gives an AI agent, such as Claude Code, access to your Telegram account. The agent saves your chats as Markdown files on disk and works with them: searches, analyzes, summarizes, drafts replies.
+A local MCP server for macOS and Windows that gives an AI agent, such as Claude Code, access to your Telegram account. The agent saves your chats as Markdown files on disk and works with them: searches, analyzes, summarizes, drafts replies.
 
-The server runs on your Mac and connects to Telegram as you, over the official MTProto protocol. It uses the Telethon library and your own `api_id`. Text on photos is recognized with Apple Vision, so you need a Mac.
+The server runs on your machine and connects to Telegram as you, over the official MTProto protocol. It uses the Telethon library and your own `api_id`. Text on photos and PDF reading use Apple Vision and PDFKit, so these two features need a Mac; everything else — login, archive, search, sending, forwarding, proxy — works on Windows too.
 
 ## Contents
 
@@ -15,6 +15,7 @@ The server runs on your Mac and connects to Telegram as you, over the official M
 - [Installation](#installation)
 - [Permissions](#permissions)
 - [Choosing a chat](#choosing-a-chat)
+- [Proxy](#proxy)
 - [Limits and risks](#limits-and-risks)
 - [Development](#development)
 - [License](#license)
@@ -100,8 +101,8 @@ The archive only grows: messages edited or deleted in Telegram stay as they were
 
 ## Requirements
 
-- A Mac.
-- [uv](https://docs.astral.sh/uv/). It installs Python 3.12 and the dependencies.
+- macOS or Windows. Login, archive, search, sending, forwarding and proxy work on both; text recognition on photos and PDF reading need macOS (Apple Vision, PDFKit).
+- [uv](https://docs.astral.sh/uv/). It installs Python 3.12 and all dependencies by itself, including `python-socks` for proxy connections.
 - An AI agent with MCP support, such as [Claude Code](https://claude.com/claude-code).
 - A Telegram account. Transcribing voice messages needs Telegram Premium.
 
@@ -109,11 +110,20 @@ The archive only grows: messages edited or deleted in Telegram stay as they were
 
 ### 1. Get the project and install dependencies
 
+Install [uv](https://docs.astral.sh/uv/) if you do not have it yet:
+
+- macOS: `brew install uv`, or the official installer `curl -LsSf https://astral.sh/uv/install.sh | sh`
+- Windows (PowerShell): `powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"`
+
+Then get the project and install the dependencies:
+
 ```bash
 git clone https://github.com/rodion1010/tg-scribe.git tg-scribe
 cd tg-scribe
 uv sync
 ```
+
+`uv sync` downloads Python 3.12 and installs every dependency — Telethon, the MCP library, `segno` for login QR codes, `python-socks` for proxy connections. Nothing else is installed by hand.
 
 ### 2. Get api_id and api_hash
 
@@ -280,6 +290,20 @@ You can name a chat by part of its title, but Telegram search does not find ever
 To see ids in Telegram itself, turn them on in the debug menu. In Telegram Desktop, open **Settings → Advanced → Experimental settings** and turn on **Show Peer IDs in Profile**. For other platforms, see the [tginfo guide](https://tginfo.me/open-debug-menu/) (in Russian).
 
 Change only this setting in the debug menu: other options can break the app or delete secret chats.
+
+## Proxy
+
+If Telegram is not reachable directly, the server can connect through a proxy. With no settings it connects directly.
+
+- **Automatic.** The server takes the proxy from the OS: the `http_proxy`/`https_proxy` environment variables, or the system proxy settings — Windows: Internet options, macOS: System Settings → Network → Proxies. Nothing to configure.
+- **Explicit.** Add a line to `~/.tgc/config.toml`:
+
+  ```toml
+  proxy = "socks5://127.0.0.1:1080"
+  ```
+
+  Supported schemes: `socks5://`, `socks4://`, `http://`, with an optional login and password: `socks5://user:pass@host:port`.
+- **Disabled.** `proxy = "direct"` connects directly even when the OS has a proxy configured.
 
 ## Limits and risks
 
