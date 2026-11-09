@@ -34,7 +34,7 @@ def load_config():
             f"Нет {path}. Создай его с api_id и api_hash из https://my.telegram.org/apps:\n"
             'api_id = 12345\napi_hash = "abc..."'
         )
-    conf = tomllib.loads(path.read_text())
+    conf = tomllib.loads(path.read_text(encoding="utf-8"))
     return int(conf["api_id"]), conf["api_hash"], conf.get("proxy")
 
 

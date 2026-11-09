@@ -59,7 +59,7 @@ def id_range(path: Path) -> tuple[int, int]:
     or a history import, the newest id can sit in an older file."""
     ids = []
     for f in month_files(path):
-        text = f.read_text()
+        text = f.read_text(encoding="utf-8")
         ids += map(int, HEADER.findall(text[: text.rfind("\n") + 1]))  # a line cut by a crash has no "\n"
     return (min(ids), max(ids)) if ids else (0, 0)
 
@@ -67,17 +67,17 @@ def id_range(path: Path) -> tuple[int, int]:
 def append(path: Path, month: str, lines: list[str]):
     f = path / f"{month}.md"
     if f.exists():
-        text = f.read_text()
+        text = f.read_text(encoding="utf-8")
         if text and not text.endswith("\n"):  # drop a line cut by a crash before appending
-            f.write_text(text[: text.rfind("\n") + 1])
-    with open(f, "a") as out:
+            f.write_text(text[: text.rfind("\n") + 1], encoding="utf-8")
+    with open(f, "a", encoding="utf-8") as out:
         out.write("".join(lines))
 
 
 def prepend(path: Path, month: str, lines: list[str]):
     f = path / f"{month}.md"
     tmp = f.with_suffix(".tmp")
-    tmp.write_text("".join(lines) + (f.read_text() if f.exists() else ""))
+    tmp.write_text("".join(lines) + (f.read_text(encoding="utf-8") if f.exists() else ""), encoding="utf-8")
     tmp.replace(f)
 
 
@@ -85,11 +85,11 @@ def update_block(path: Path, msg_id: int, fn) -> bool:
     """Rewrites one message (header plus continuation lines) with fn(block)."""
     block = re.compile(rf"^\[[^\]]+\] #{msg_id} .*\n(?:  .*\n)*", re.M)
     for f in reversed(month_files(path)):
-        text = f.read_text()
+        text = f.read_text(encoding="utf-8")
         m = block.search(text)
         if m:
             tmp = f.with_suffix(".tmp")
-            tmp.write_text(text[: m.start()] + fn(m.group()) + text[m.end():])
+            tmp.write_text(text[: m.start()] + fn(m.group()) + text[m.end():], encoding="utf-8")
             tmp.replace(f)
             return True
     return False
@@ -122,7 +122,7 @@ def pending_ids(path: Path, kind: str) -> list[int]:
     ids = []
     for f in reversed(month_files(path)):
         # The tag followed only by other tags and then ": ", so a sender name may contain ": " too.
-        ids += reversed([int(i) for i in re.findall(rf"^\[[^\]]+\] #(\d+) .*?{PENDING[kind]}(?: \[[^\]]*\])*: ", f.read_text(), re.M)])
+        ids += reversed([int(i) for i in re.findall(rf"^\[[^\]]+\] #(\d+) .*?{PENDING[kind]}(?: \[[^\]]*\])*: ", f.read_text(encoding="utf-8"), re.M)])
     return ids
 
 
@@ -400,7 +400,7 @@ async def read_media(client, msg, path):
     if not lines:
         return f"{info}, без текста", []
     (path / "text").mkdir(exist_ok=True)
-    (path / "text" / f"{msg.id}.txt").write_text("\n".join(lines) + "\n")
+    (path / "text" / f"{msg.id}.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
     return f"{info}, с текстом", []
 
 
@@ -481,14 +481,14 @@ async def sync_chat(client, entity, days=None, root=ARCHIVE):
     first_id, last_id = id_range(path)
     # The depth (unix time, 0 = the whole history) is kept on disk: a big load spans several calls.
     depth = path / ".depth"
-    target = float(depth.read_text()) if depth.exists() else None
+    target = float(depth.read_text(encoding="utf-8")) if depth.exists() else None
     if days:
         since = time.time() - days * 86400
         target = since if target is None else min(target, since)
     elif target is None and last_id == 0:
         target = 0.0
     if target is not None:
-        depth.write_text(str(target))
+        depth.write_text(str(target), encoding="utf-8")
     buf: dict[str, list[str]] = {}
     new = old = voiced = unvoiced = 0
     auto = {"фото": 0, "файл": 0}
