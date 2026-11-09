@@ -27,8 +27,10 @@ The server runs on your Mac and connects to Telegram as you, over the official M
 | `sync_chat` | Saves a chat to the archive: the last N days or the whole history. Later calls add new messages |
 | `transcribe` | Transcribes voice and video messages. Needs Telegram Premium |
 | `ocr_photos` | Reads text on photos with Apple Vision, locally on your Mac |
-| `fetch_media` | Downloads a photo so the agent can look at it |
-| `describe_photo` | Saves a short photo description to the archive |
+| `read_files` | Reads the text of txt, md, csv, html, pdf, doc, docx, rtf, xlsx, pptx and image files locally on your Mac, including scanned PDFs, and saves it to `text/<id>.txt` in the chat folder |
+| `fetch_media` | Downloads a photo or a file up to 50 MB so the agent can look at it. Files keep their names: `<id>_<name>`. Videos and audio are not downloaded |
+| `describe_media` | Saves a short description of a photo or a file to the archive |
+| `fetch_large_file` | Downloads a file over 50 MB after you confirm it. A big file is downloaded over several calls |
 | `send_message` | Sends a message after you confirm it |
 | `forward_messages` | Forwards messages to another chat after you confirm it |
 
@@ -38,14 +40,14 @@ The server runs on your Mac and connects to Telegram as you, over the official M
 2. The agent calls `sync_chat` with `days=21`. The server saves three weeks of messages to the archive, newest first.
 3. The agent searches the archive. An important voice message is marked as not transcribed, so the agent transcribes it with `transcribe`. It needs the numbers from a photo of an estimate, so it reads the text with `ocr_photos`.
 4. The agent answers and cites message ids.
-5. Next day you ask: "Anything new?" `sync_chat` loads only new messages. It transcribes and reads their voice messages and photos right away, up to 20 per call.
+5. Next day you ask: "Anything new?" `sync_chat` loads only new messages. It transcribes and reads their voice messages, photos and files up to 10 MB right away, up to 20 of each per call. Bigger files wait for `read_files`.
 6. You ask: "And what did we decide last month?" The agent calls `sync_chat` with `days=60`, and the server loads the missing older history.
 
-Voice messages and photos from older history are not processed while loading. The agent transcribes and reads them only when a task needs them. That is why loading takes minutes, not hours, and does not use up limits.
+Voice messages, photos and files from older history are not processed while loading. The agent transcribes and reads them only when a task needs them. That is why loading takes minutes, not hours, and does not use up limits.
 
 ## Archive
 
-Chats are stored in the `archive/` folder next to the MCP source code, one file per month. The folder is in `.gitignore`.
+Chats are stored in the `archive/` folder next to the MCP source code, one file per month. The text of read files is in the `text/` subfolder of each chat. The folder is in `.gitignore`.
 
 ```
 archive/Ivan-Petrov__123456789/2026-10.md
@@ -63,6 +65,7 @@ One line per message. The tags are in Russian. Sample file:
 [2026-10-31 14:07] #48217 Ivan Petrov [переслано из «Renovation News»]: Tile prices went up
   15% in November
 [2026-10-31 14:10] #48218 Ivan Petrov: [кружок 0:35, не расшифровано]
+[2026-10-31 14:12] #48219 Ivan Petrov [файл contract.docx, 48 КБ, с текстом]: please sign
 ```
 
 What each part means:
@@ -80,10 +83,18 @@ What each part means:
 | `[фото]` | Photo not processed yet |
 | `[фото, с текстом]` | Photo has text, shown in the `[на фото]` lines below |
 | `[фото, без текста]` | Photo has no text |
-| `[фото: …]` | Photo description saved by the agent |
+| `[фото: …]`, `[фото, с текстом: …]` | Photo description saved by the agent |
 | `[фото, недоступно]` | Photo was deleted from Telegram |
 | `[фото, не читается]` | Photo file is broken |
-| `[файл report.pdf]`, `[видео]`, `[стикер 👍]`, `[gif]`, `[опрос]`, `[геопозиция]`, `[контакт]` | File, video, sticker, GIF, poll, location, contact |
+| `[файл report.pdf, 2.3 МБ]` | File. For txt, md, csv, html, pdf, doc, docx, rtf, xlsx, pptx and images: not read yet |
+| `[файл …, с текстом]` | The full text of the file is in `text/<id>.txt` in the chat folder, not in the month file: the agent spends no tokens on it until the file is needed |
+| `[файл …, без текста]` | The file has no text |
+| `[файл …, 12 стр., …]` | PDF page count, added once the file is read |
+| `[файл …, скан, …]` | Some PDF pages were scans: their text was read with Apple Vision and may have errors |
+| `[файл …: …]`, `[файл …, с текстом: …]` | File description saved by the agent. It does not replace the state: an unread file is still read by `read_files` |
+| `[файл …, недоступно]`, `[файл …, не читается]` | File was deleted from Telegram or is broken |
+| `[файл …, слишком большой]` | File is over 50 MB, the server does not download it |
+| `[видео]`, `[стикер 👍]`, `[gif]`, `[опрос]`, `[геопозиция]`, `[контакт]` | Video, sticker, GIF, poll, location, contact |
 
 The archive only grows: messages edited or deleted in Telegram stay as they were saved.
 
@@ -177,12 +188,12 @@ claude mcp add tg --scope user -- uv run --directory /path/to/tg-scribe python -
 
 The archive still lives in `archive/` next to the MCP source code.
 
-The project's `.claude/settings.json` rule that asks before sending does not apply in other folders. Add it to `~/.claude/settings.json`:
+The project's `.claude/settings.json` rules that ask before sending and before downloading big files do not apply in other folders. Add them to `~/.claude/settings.json`:
 
 ```json
 {
   "permissions": {
-    "ask": ["mcp__tg__send_message", "mcp__tg__forward_messages"]
+    "ask": ["mcp__tg__send_message", "mcp__tg__forward_messages", "mcp__tg__fetch_large_file"]
   }
 }
 ```
@@ -244,7 +255,7 @@ mcp_servers:
     trust: untrusted
 ```
 
-Read-only tools then run without questions — the server marks them with a `readOnlyHint` annotation. `send_message` and `forward_messages` ask every time: Allow Once, Allow Session or Allow Always. "Allow Always" writes the tool to `command_allowlist` in the same file — remove that line to revoke it.
+Read-only tools then run without questions — the server marks them with a `readOnlyHint` annotation. `send_message`, `forward_messages` and `fetch_large_file` ask every time: Allow Once, Allow Session or Allow Always. "Allow Always" writes the tool to `command_allowlist` in the same file — remove that line to revoke it.
 
 4. Restart Hermes, or run `/reload-mcp` in an open session.
 
@@ -254,9 +265,11 @@ Ask the agent: "Show my recent Telegram chats". It calls `list_dialogs` and show
 
 ## Permissions
 
-The agent sends and forwards messages only after you confirm it. Tools are separated by annotations: every tool that only reads — listing chats, saving the archive, transcription, text recognition — carries a `readOnlyHint` annotation, so agents run it without questions. `send_message` and `forward_messages` carry no annotation: agents that respect the hint, such as Hermes, ask for confirmation on every call.
+The agent sends and forwards messages only after you confirm it. Tools are separated by annotations: every tool that only reads — listing chats, saving the archive, transcription, text and file recognition — carries a `readOnlyHint` annotation, so agents run it without questions. `send_message`, `forward_messages` and `fetch_large_file` carry no annotation: agents that respect the hint, such as Hermes, ask for confirmation on every call.
 
 In Claude Code, `.claude/settings.json` takes care of this: it allows reading, saving and recognizing chats without asking, and sets an `ask` rule on sending and forwarding. Claude Code shows the text and the chat every time and waits for your "yes". Do not move `send_message` or `forward_messages` to `allow`.
+
+`fetch_large_file` works the same way, through `ask`: a file over 50 MB is downloaded only if you agree. This keeps the agent from filling the disk and spending time on a file you do not need.
 
 The rule works only in the project folder. For other folders, add it to `~/.claude/settings.json` as described in step 5. In other agents, set up confirmation for `send_message` the same way.
 

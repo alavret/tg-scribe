@@ -6,9 +6,11 @@
       "mcp__tg__transcribe",
       "mcp__tg__ocr_photos",
       "mcp__tg__fetch_media",
-      "mcp__tg__describe_photo"
+      "mcp__tg__read_files",
+      "mcp__tg__describe_media"
     ],
     "ask": [
+      "mcp__tg__fetch_large_file",
       "mcp__tg__send_message",
       "mcp__tg__forward_messages"
     ]

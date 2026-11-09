@@ -1,5 +1,5 @@
 version = 1
-revision = 5
+revision = 3
 requires-python = ">=3.12"
 resolution-markers = [
     "python_full_version >= '3.14'",
@@ -856,6 +856,7 @@ version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
     { name = "mcp" },
+    { name = "pyobjc-framework-quartz", marker = "sys_platform == 'darwin'" },
     { name = "pyobjc-framework-vision", marker = "sys_platform == 'darwin'" },
     { name = "segno" },
     { name = "telethon" },
@@ -869,6 +870,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "mcp" },
+    { name = "pyobjc-framework-quartz", marker = "sys_platform == 'darwin'", specifier = ">=13.0" },
     { name = "pyobjc-framework-vision", marker = "sys_platform == 'darwin'", specifier = ">=13.0" },
     { name = "segno", specifier = ">=1.6.6" },
     { name = "telethon" },
