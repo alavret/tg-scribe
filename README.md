@@ -4,7 +4,7 @@ English | [Русский](README.ru.md)
 
 A local MCP server for macOS and Windows that gives an AI agent, such as Claude Code, access to your Telegram account. The agent saves your chats as Markdown files on disk and works with them: searches, analyzes, summarizes, drafts replies.
 
-The server runs on your machine and connects to Telegram as you, over the official MTProto protocol. It uses the Telethon library and your own `api_id`. Text on photos and PDF reading use Apple Vision and PDFKit, so these two features need a Mac; everything else — login, archive, search, sending, forwarding, proxy — works on Windows too.
+The server runs on your machine and connects to Telegram as you, over the official MTProto protocol. It uses the Telethon library and your own `api_id`. Text on photos and reading PDF, doc and rtf use Apple Vision, PDFKit and textutil, so these features need a Mac; everything else — login, archive, search, sending, forwarding, proxy — works on Windows too.
 
 ## Contents
 
@@ -101,7 +101,7 @@ The archive only grows: messages edited or deleted in Telegram stay as they were
 
 ## Requirements
 
-- macOS or Windows. Login, archive, search, sending, forwarding and proxy work on both; text recognition on photos and PDF reading need macOS (Apple Vision, PDFKit).
+- macOS or Windows. Login, archive, search, sending, forwarding and proxy work on both; text recognition on photos and reading PDF, doc and rtf need macOS (Apple Vision, PDFKit, textutil).
 - [uv](https://docs.astral.sh/uv/). It installs Python 3.12 and all dependencies by itself, including `python-socks` for proxy connections.
 - An AI agent with MCP support, such as [Claude Code](https://claude.com/claude-code).
 - A Telegram account. Transcribing voice messages needs Telegram Premium.
@@ -239,7 +239,21 @@ Or add the server by hand to the config:
 }
 ```
 
-3. Ask the agent: "Show my recent Telegram chats". The tools are named `tg_list_dialogs`, `tg_send_message` and so on.
+3. Make sends, forwards and large downloads ask for confirmation. OpenCode allows every tool by default and ignores the `readOnlyHint` annotation, so without these rules the agent sends a message without asking. Add to the same config:
+
+```jsonc
+{
+  "permissions": [
+    { "action": "tg_send_message", "resource": "*", "effect": "ask" },
+    { "action": "tg_forward_messages", "resource": "*", "effect": "ask" },
+    { "action": "tg_fetch_large_file", "resource": "*", "effect": "ask" }
+  ]
+}
+```
+
+If the config already has `allow` rules, put these after them: the last matching rule wins. This is the V2 config format; older OpenCode versions call the key `permission`, check the [docs](https://opencode.ai/docs/permissions/) for your version.
+
+4. Ask the agent: "Show my recent Telegram chats". The tools are named `tg_list_dialogs`, `tg_send_message` and so on.
 
 #### Hermes Agent
 
@@ -275,7 +289,7 @@ Ask the agent: "Show my recent Telegram chats". It calls `list_dialogs` and show
 
 ## Permissions
 
-The agent sends and forwards messages only after you confirm it. Tools are separated by annotations: every tool that only reads — listing chats, saving the archive, transcription, text and file recognition — carries a `readOnlyHint` annotation, so agents run it without questions. `send_message`, `forward_messages` and `fetch_large_file` carry no annotation: agents that respect the hint, such as Hermes, ask for confirmation on every call.
+The agent sends and forwards messages only after you confirm it. Tools are separated by annotations: every tool that only reads — listing chats, saving the archive, transcription, text and file recognition — carries a `readOnlyHint` annotation, so agents run it without questions. `send_message`, `forward_messages` and `fetch_large_file` carry no annotation: agents that respect the hint, such as Hermes, ask for confirmation on every call. The annotation is only a hint: an agent that ignores it, such as OpenCode, needs explicit approval rules, as in the guide above.
 
 In Claude Code, `.claude/settings.json` takes care of this: it allows reading, saving and recognizing chats without asking, and sets an `ask` rule on sending and forwarding. Claude Code shows the text and the chat every time and waits for your "yes". Do not move `send_message` or `forward_messages` to `allow`.
 
