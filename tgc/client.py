@@ -1,8 +1,10 @@
 import os
 import sys
 import tomllib
+import urllib.request
 from contextlib import asynccontextmanager
 from pathlib import Path
+from urllib.parse import urlparse
 
 from mcp.server.mcpserver.exceptions import ToolError
 from telethon import TelegramClient
@@ -33,7 +35,75 @@ def load_config():
             'api_id = 12345\napi_hash = "abc..."'
         )
     conf = tomllib.loads(path.read_text())
-    return int(conf["api_id"]), conf["api_hash"]
+    return int(conf["api_id"]), conf["api_hash"], conf.get("proxy")
+
+
+def proxy_spec(url):
+    """Строка вида 'socks5://127.0.0.1:12334' -> dict-прокси для Telethon; None, если прокси не задан."""
+    if not url:
+        return None
+    p = urlparse(url)
+    scheme = p.scheme.lower()
+    if scheme == "socks":  # версия SOCKS не указана — считаем SOCKS5
+        scheme = "socks5"
+    if scheme not in ("socks5", "socks4", "http") or not p.hostname or not p.port:
+        raise ToolError(
+            f"proxy = {url!r}: ожидается socks5://хост:порт, socks4://хост:порт или http://хост:порт"
+        )
+    spec = {"proxy_type": scheme, "addr": p.hostname, "port": p.port, "rdns": True}
+    if p.username:
+        spec["username"] = p.username
+    if p.password:
+        spec["password"] = p.password
+    return spec
+
+
+def _os_proxies():
+    """Системные настройки прокси ОС: реестр Windows или System Configuration macOS.
+    {} — Linux, настройки недоступны или не заданы."""
+    if sys.platform == "darwin":
+        reader = getattr(urllib.request, "getproxies_macosx_sysconf", None)
+    elif os.name == "nt":
+        reader = getattr(urllib.request, "getproxies_registry", None)
+    else:
+        reader = None
+    if reader is None:
+        return {}
+    try:
+        return reader() or {}
+    except Exception:  # настройки ОС не читаются — подключаемся напрямую
+        return {}
+
+
+def system_proxy():
+    """Прокси из настроек ОС: переменные окружения (http_proxy/https_proxy), затем системный прокси —
+    реестр Windows (ProxyEnable/ProxyServer) или System Configuration macOS (Network → Proxies).
+
+    urllib.request.getproxies() не подходит: если задана только no_proxy, он возвращает
+    {'no': ...} — словарь истинен, и системные настройки не проверяются вовсе."""
+    env = urllib.request.getproxies_environment()
+    os_proxies = _os_proxies()
+    for source in (env, os_proxies):
+        for scheme in ("https", "http"):
+            if source.get(scheme):
+                return source[scheme]
+    socks = os_proxies.get("socks")  # macOS: включён только SOCKS-прокси, без HTTP
+    if socks:
+        # SystemConfiguration не указывает версию SOCKS и отдаёт значение как http://host:port
+        p = urlparse(socks)
+        if p.hostname and p.port:
+            return f"socks5://{p.hostname}:{p.port}"
+    return None
+
+
+def resolve_proxy(configured):
+    """proxy из config.toml: URL — явно заданный прокси, 'direct'/'none' — без прокси,
+    не задан — системный прокси ОС (см. system_proxy)."""
+    if not configured:
+        return proxy_spec(system_proxy())
+    if configured.strip().lower() in ("direct", "none", "off"):
+        return None
+    return proxy_spec(configured)
 
 
 @asynccontextmanager
@@ -47,9 +117,12 @@ async def telegram(login=False):
             _lock_file(lock)
         except OSError:  # BlockingIOError (POSIX) / PermissionError (Windows): занято
             raise ToolError("Telegram занят другой сессией, повтори позже") from None
-        api_id, api_hash = load_config()
+        api_id, api_hash, configured_proxy = load_config()
         # Longer FloodWaits are raised, so a call never sleeps past its time budget.
-        client = TelegramClient(str(SESSION), api_id, api_hash, flood_sleep_threshold=30)
+        client = TelegramClient(
+            str(SESSION), api_id, api_hash, flood_sleep_threshold=30,
+            proxy=resolve_proxy(configured_proxy),
+        )
         try:
             await client.connect()
             if not login and not await client.is_user_authorized():
