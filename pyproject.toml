@@ -9,6 +9,7 @@ dependencies = [
     "telethon",
     "mcp",
     "pyobjc-framework-vision>=13.0 ; sys_platform == 'darwin'",
+    "segno>=1.6.6",
 ]
 
 [dependency-groups]

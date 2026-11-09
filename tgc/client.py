@@ -1,4 +1,5 @@
-import fcntl
+import os
+import sys
 import tomllib
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -11,6 +12,17 @@ from telethon.utils import get_display_name, get_peer_id
 
 CONF_DIR = Path.home() / ".tgc"
 SESSION = CONF_DIR / "tgc"  # Telethon adds .session
+
+if os.name == "nt":  # Windows: блокировка байта через msvcrt, на POSIX — flock
+    import msvcrt
+
+    def _lock_file(f):
+        msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+else:
+    import fcntl
+
+    def _lock_file(f):
+        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
 
 def load_config():
@@ -26,24 +38,22 @@ def load_config():
 
 @asynccontextmanager
 async def telegram(login=False):
-    """One Telegram connection per call: every Claude session runs its own server process,
-    and two processes on one SQLite session file fail with `database is locked`."""
+    """One Telegram connection per call: every agent session runs its own server process,
+    and two processes on one SQLite session file fail with `database is locked`.
+    login=True — подключение без проверки входа: так tgc.login сам ведёт QR-поток авторизации."""
     CONF_DIR.mkdir(mode=0o700, exist_ok=True)
     with open(CONF_DIR / "tgc.lock", "w") as lock:
         try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            raise ToolError("Telegram занят другой сессией Claude, повтори позже") from None
+            _lock_file(lock)
+        except OSError:  # BlockingIOError (POSIX) / PermissionError (Windows): занято
+            raise ToolError("Telegram занят другой сессией, повтори позже") from None
         api_id, api_hash = load_config()
         # Longer FloodWaits are raised, so a call never sleeps past its time budget.
         client = TelegramClient(str(SESSION), api_id, api_hash, flood_sleep_threshold=30)
         try:
-            if login:
-                await client.start()
-            else:
-                await client.connect()
-                if not await client.is_user_authorized():
-                    raise ToolError("Нет входа в Telegram: выполни `uv run python -m tgc.login`")
+            await client.connect()
+            if not login and not await client.is_user_authorized():
+                raise ToolError("Нет входа в Telegram: выполни `uv run python -m tgc.login`")
             yield client
         except (RPCError, ConnectionError) as e:  # MCP hides the text of other exceptions from Claude
             raise ToolError(f"Telegram: {e}") from e
