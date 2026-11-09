@@ -1,3 +1,4 @@
+import asyncio
 import os
 import sys
 import tomllib
@@ -25,6 +26,10 @@ else:
 
     def _lock_file(f):
         fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+# Agents call read-only tools in parallel: inside one process they queue here
+# instead of failing on the file lock, which is only for other processes.
+_busy = asyncio.Lock()
 
 
 def load_config():
@@ -111,27 +116,28 @@ async def telegram(login=False):
     """One Telegram connection per call: every agent session runs its own server process,
     and two processes on one SQLite session file fail with `database is locked`.
     login=True — подключение без проверки входа: так tgc.login сам ведёт QR-поток авторизации."""
-    CONF_DIR.mkdir(mode=0o700, exist_ok=True)
-    with open(CONF_DIR / "tgc.lock", "w") as lock:
-        try:
-            _lock_file(lock)
-        except OSError:  # BlockingIOError (POSIX) / PermissionError (Windows): занято
-            raise ToolError("Telegram занят другой сессией, повтори позже") from None
-        api_id, api_hash, configured_proxy = load_config()
-        # Longer FloodWaits are raised, so a call never sleeps past its time budget.
-        client = TelegramClient(
-            str(SESSION), api_id, api_hash, flood_sleep_threshold=30,
-            proxy=resolve_proxy(configured_proxy),
-        )
-        try:
-            await client.connect()
-            if not login and not await client.is_user_authorized():
-                raise ToolError("Нет входа в Telegram: выполни `uv run python -m tgc.login`")
-            yield client
-        except (RPCError, ConnectionError) as e:  # MCP hides the text of other exceptions from Claude
-            raise ToolError(f"Telegram: {e}") from e
-        finally:
-            await client.disconnect()
+    async with _busy:
+        CONF_DIR.mkdir(mode=0o700, exist_ok=True)
+        with open(CONF_DIR / "tgc.lock", "w") as lock:
+            try:
+                _lock_file(lock)
+            except OSError:  # BlockingIOError (POSIX) / PermissionError (Windows): занято
+                raise ToolError("Telegram занят другой сессией, повтори позже") from None
+            api_id, api_hash, configured_proxy = load_config()
+            # Longer FloodWaits are raised, so a call never sleeps past its time budget.
+            client = TelegramClient(
+                str(SESSION), api_id, api_hash, flood_sleep_threshold=30,
+                proxy=resolve_proxy(configured_proxy),
+            )
+            try:
+                await client.connect()
+                if not login and not await client.is_user_authorized():
+                    raise ToolError("Нет входа в Telegram: выполни `uv run python -m tgc.login`")
+                yield client
+            except (RPCError, ConnectionError) as e:  # MCP hides the text of other exceptions from Claude
+                raise ToolError(f"Telegram: {e}") from e
+            finally:
+                await client.disconnect()
 
 
 async def resolve(client, chat: str):

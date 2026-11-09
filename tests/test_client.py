@@ -123,3 +123,27 @@ def test_system_proxy_none_when_nowhere(monkeypatch):
     monkeypatch.setattr(os, "name", "posix")
     monkeypatch.setattr(sys, "platform", "linux")
     assert system_proxy() is None
+
+
+def test_parallel_calls_queue_instead_of_busy(tmp_path, monkeypatch):
+    """Agents run read-only tools in parallel; in one process they must wait, not fail on the file lock."""
+    import tgc.client as client
+
+    class Client:
+        def __init__(self, *a, **kw): ...
+        async def connect(self): ...
+        async def is_user_authorized(self): return True
+        async def disconnect(self): ...
+
+    monkeypatch.setattr(client, "CONF_DIR", tmp_path)
+    monkeypatch.setattr(client, "load_config", lambda: (1, "h", "direct"))
+    monkeypatch.setattr(client, "TelegramClient", Client)
+
+    async def call():
+        async with client.telegram():
+            await asyncio.sleep(0.01)
+
+    async def both():
+        await asyncio.gather(call(), call())
+
+    asyncio.run(both())
