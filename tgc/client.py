@@ -5,7 +5,7 @@ import tomllib
 import urllib.request
 from contextlib import asynccontextmanager
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from mcp.server.mcpserver.exceptions import ToolError
 from telethon import TelegramClient
@@ -57,9 +57,9 @@ def proxy_spec(url):
         )
     spec = {"proxy_type": scheme, "addr": p.hostname, "port": p.port, "rdns": True}
     if p.username:
-        spec["username"] = p.username
+        spec["username"] = unquote(p.username)  # p%40ss in a URL is the password p@ss
     if p.password:
-        spec["password"] = p.password
+        spec["password"] = unquote(p.password)
     return spec
 
 

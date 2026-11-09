@@ -316,7 +316,7 @@ If Telegram is not reachable directly, the server can connect through a proxy. W
   proxy = "socks5://127.0.0.1:1080"
   ```
 
-  Supported schemes: `socks5://`, `socks4://`, `http://`, with an optional login and password: `socks5://user:pass@host:port`.
+  Supported schemes: `socks5://`, `socks4://`, `http://`, with an optional login and password: `socks5://user:pass@host:port`. The characters `@`, `:` and `/` in a login or password are written as `%40`, `%3A` and `%2F`.
 - **Disabled.** `proxy = "direct"` connects directly even when the OS has a proxy configured.
 
 ## Limits and risks

@@ -147,3 +147,9 @@ def test_parallel_calls_queue_instead_of_busy(tmp_path, monkeypatch):
         await asyncio.gather(call(), call())
 
     asyncio.run(both())
+
+
+def test_proxy_spec_decodes_percent_escapes():
+    # «@» and «:» in a login or password must be written as %40 and %3A in the URL
+    spec = proxy_spec("socks5://us%3Aer:p%40ss@127.0.0.1:1080")
+    assert spec["username"] == "us:er" and spec["password"] == "p@ss"
