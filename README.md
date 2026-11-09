@@ -23,13 +23,14 @@ The server runs on your Mac and connects to Telegram as you, over the official M
 
 | Tool | What it does |
 |---|---|
-| `list_dialogs` | Shows the 50 most recent chats. Finds any other chat by name |
+| `list_dialogs` | Shows the 50 most recent chats with their folders. Finds any other chat by name; `folder` leaves only the chats of one folder |
 | `sync_chat` | Saves a chat to the archive: the last N days or the whole history. Later calls add new messages |
 | `transcribe` | Transcribes voice and video messages. Needs Telegram Premium |
 | `ocr_photos` | Reads text on photos with Apple Vision, locally on your Mac |
 | `fetch_media` | Downloads a photo so the agent can look at it |
 | `describe_photo` | Saves a short photo description to the archive |
 | `send_message` | Sends a message after you confirm it |
+| `forward_messages` | Forwards messages to another chat after you confirm it |
 
 ### How it works in practice
 
@@ -150,7 +151,7 @@ chmod 600 ~/.tgc/config.toml
 uv run python -m tgc.login
 ```
 
-The program asks for your phone number, the code from Telegram and your cloud password if two-step verification is on. After login the file `~/.tgc/tgc.session` appears.
+The program shows a QR code — scan it in Telegram: **Settings → Devices → Link Desktop Device**. The code opens as a PNG in your default image viewer; add `--terminal` to print it right in the terminal instead. The code lives about 26 seconds and is re-shown automatically. If two-step verification is on, the program asks for your cloud password. After login the file `~/.tgc/tgc.session` appears.
 
 This file gives full access to your account without a code or password. Do not copy it, publish it or put it in cloud storage. If it leaks, end the session in Telegram: **Settings → Devices**.
 
@@ -162,7 +163,9 @@ The server starts with this command:
 uv run --directory /path/to/tg-scribe python -m tgc.server
 ```
 
-Here `/path/to/tg-scribe` is the folder you cloned the project into. Add this command to your agent's MCP server settings. The steps for Claude Code follow.
+Here `/path/to/tg-scribe` is the folder you cloned the project into. Add this command to your agent's MCP server settings. The steps for Claude Code, OpenChamber (OpenCode) and Hermes Agent follow.
+
+#### Claude Code
 
 The project already has `.mcp.json` with this server. Start Claude Code in the project folder and allow the `tg` server when Claude Code asks.
 
@@ -179,10 +182,71 @@ The project's `.claude/settings.json` rule that asks before sending does not app
 ```json
 {
   "permissions": {
-    "ask": ["mcp__tg__send_message"]
+    "ask": ["mcp__tg__send_message", "mcp__tg__forward_messages"]
   }
 }
 ```
+
+#### OpenChamber and OpenCode
+
+1. Add the server. Run this from any folder; `--global` makes it available in every project:
+
+```sh
+opencode mcp add tg --global -- uv run --directory /path/to/tg-scribe python -m tgc.server
+```
+
+The command writes the server to the config file it names, usually `~/.config/opencode/opencode.json`.
+
+2. Check the connection:
+
+```sh
+opencode mcp list
+```
+
+`✓ tg connected` means the server is up. Inside the app, `/mcps` shows the servers and their state.
+
+Or add the server by hand to the config:
+
+```jsonc
+{
+  "mcp": {
+    "tg": {
+      "type": "local",
+      "command": ["uv", "run", "--directory", "/path/to/tg-scribe", "python", "-m", "tgc.server"]
+    }
+  }
+}
+```
+
+3. Ask the agent: "Show my recent Telegram chats". The tools are named `tg_list_dialogs`, `tg_send_message` and so on.
+
+#### Hermes Agent
+
+1. Add the server. `--command` wants the full path to `uv` — find yours with `which uv`:
+
+```sh
+hermes mcp add tg --command /opt/homebrew/bin/uv --args run --directory /path/to/tg-scribe python -m tgc.server
+```
+
+Answer "y" when Hermes offers to enable the tools.
+
+2. Check the connection:
+
+```sh
+hermes mcp test tg
+```
+
+3. Make sends and forwards ask for confirmation. In `~/.hermes/config.yaml`:
+
+```yaml
+mcp_servers:
+  tg:
+    trust: untrusted
+```
+
+Read-only tools then run without questions — the server marks them with a `readOnlyHint` annotation. `send_message` and `forward_messages` ask every time: Allow Once, Allow Session or Allow Always. "Allow Always" writes the tool to `command_allowlist` in the same file — remove that line to revoke it.
+
+4. Restart Hermes, or run `/reload-mcp` in an open session.
 
 ### 6. Check the connection
 
@@ -190,7 +254,9 @@ Ask the agent: "Show my recent Telegram chats". It calls `list_dialogs` and show
 
 ## Permissions
 
-The agent sends a message only after you confirm it. In Claude Code, `.claude/settings.json` takes care of this: it allows reading, saving and recognizing chats without asking, and sets an `ask` rule on sending. Claude Code shows the text and the chat every time and waits for your "yes". Do not move `send_message` to `allow`.
+The agent sends and forwards messages only after you confirm it. Tools are separated by annotations: every tool that only reads — listing chats, saving the archive, transcription, text recognition — carries a `readOnlyHint` annotation, so agents run it without questions. `send_message` and `forward_messages` carry no annotation: agents that respect the hint, such as Hermes, ask for confirmation on every call.
+
+In Claude Code, `.claude/settings.json` takes care of this: it allows reading, saving and recognizing chats without asking, and sets an `ask` rule on sending and forwarding. Claude Code shows the text and the chat every time and waits for your "yes". Do not move `send_message` or `forward_messages` to `allow`.
 
 The rule works only in the project folder. For other folders, add it to `~/.claude/settings.json` as described in step 5. In other agents, set up confirmation for `send_message` the same way.
 
