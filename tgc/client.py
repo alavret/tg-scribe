@@ -5,11 +5,12 @@ import tomllib
 import urllib.request
 from contextlib import asynccontextmanager
 from pathlib import Path
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from mcp.server.mcpserver.exceptions import ToolError
 from telethon import TelegramClient
 from telethon.errors import RPCError
+from telethon.network.connection import ConnectionTcpMTProxyAbridged
 from telethon.tl.functions.contacts import SearchRequest
 from telethon.utils import get_display_name, get_peer_id
 
@@ -44,23 +45,50 @@ def load_config():
 
 
 def proxy_spec(url):
-    """Строка вида 'socks5://127.0.0.1:12334' -> dict-прокси для Telethon; None, если прокси не задан."""
+    """URL прокси → (proxy, connection) для TelegramClient; (None, None) — напрямую.
+
+    Схема необязательна: '127.0.0.1:8080' — то же, что 'https://127.0.0.1:8080'.
+    Поддерживаются socks5://, socks4://, http://, https:// (HTTP CONNECT; TLS до
+    самого прокси python-socks не умеет), с логином и паролем — спецсимволы в
+    %-кодировке: p%40ss = пароль p@ss; и mtproto://хост:порт/секрет (или ?секрет=)."""
     if not url:
-        return None
+        return None, None
+    url = url.strip()
+    if "://" not in url:
+        url = "https://" + url  # схема не указана — по умолчанию https (HTTP CONNECT)
     p = urlparse(url)
     scheme = p.scheme.lower()
     if scheme == "socks":  # версия SOCKS не указана — считаем SOCKS5
         scheme = "socks5"
+    if scheme == "mtproto":
+        secret = unquote(p.path.lstrip("/")) or unquote(parse_qs(p.query).get("secret", [""])[0])
+        if not p.hostname or not p.port or not secret:
+            raise ToolError(f"proxy = {url!r}: ожидается mtproto://хост:порт/секрет")
+        return (p.hostname, p.port, secret), ConnectionTcpMTProxyAbridged
+    if scheme == "https":  # python-socks: HTTP CONNECT, шифрование до прокси не поддерживается
+        scheme = "http"
     if scheme not in ("socks5", "socks4", "http") or not p.hostname or not p.port:
         raise ToolError(
-            f"proxy = {url!r}: ожидается socks5://хост:порт, socks4://хост:порт или http://хост:порт"
+            f"proxy = {url!r}: ожидается socks5://хост:порт, socks4://хост:порт, http(s)://хост:порт, "
+            "mtproto://хост:порт/секрет или просто хост:порт"
         )
     spec = {"proxy_type": scheme, "addr": p.hostname, "port": p.port, "rdns": True}
     if p.username:
         spec["username"] = unquote(p.username)  # p%40ss in a URL is the password p@ss
     if p.password:
         spec["password"] = unquote(p.password)
-    return spec
+    return spec, None
+
+
+def mask_credentials(url):
+    """URL прокси с замаскированным паролем — для вывода в лог и ошибки."""
+    p = urlparse(url if "://" in url else "https://" + url)
+    if not p.hostname:
+        return url
+    auth = f"{unquote(p.username)}:***@" if p.username else ""
+    port = f":{p.port}" if p.port else ""
+    tail = f"/{unquote(p.path.lstrip('/'))}" if p.path.strip("/") else ""
+    return f"{p.scheme}://{auth}{p.hostname}{port}{tail}"
 
 
 def _os_proxies():
@@ -80,35 +108,67 @@ def _os_proxies():
         return {}
 
 
-def system_proxy():
-    """Прокси из настроек ОС: переменные окружения (http_proxy/https_proxy), затем системный прокси —
-    реестр Windows (ProxyEnable/ProxyServer) или System Configuration macOS (Network → Proxies).
+def system_proxies():
+    """[(url, источник), ...] — прокси из переменных окружения и настроек ОС, по убыванию приоритета.
 
     urllib.request.getproxies() не подходит: если задана только no_proxy, он возвращает
     {'no': ...} — словарь истинен, и системные настройки не проверяются вовсе."""
+    found, seen = [], set()
+
+    def add(url, source):
+        if url and url not in seen:
+            seen.add(url)
+            found.append((url, source))
+
     env = urllib.request.getproxies_environment()
+    for scheme in ("https", "http"):
+        add(env.get(scheme), f"переменная окружения {scheme}_proxy")
     os_proxies = _os_proxies()
-    for source in (env, os_proxies):
-        for scheme in ("https", "http"):
-            if source.get(scheme):
-                return source[scheme]
+    for scheme in ("https", "http"):
+        add(os_proxies.get(scheme), "настройки прокси ОС")
     socks = os_proxies.get("socks")  # macOS: включён только SOCKS-прокси, без HTTP
     if socks:
         # SystemConfiguration не указывает версию SOCKS и отдаёт значение как http://host:port
         p = urlparse(socks)
         if p.hostname and p.port:
-            return f"socks5://{p.hostname}:{p.port}"
-    return None
+            add(f"socks5://{p.hostname}:{p.port}", "настройки прокси ОС (SOCKS)")
+    return found
 
 
 def resolve_proxy(configured):
-    """proxy из config.toml: URL — явно заданный прокси, 'direct'/'none' — без прокси,
-    не задан — системный прокси ОС (см. system_proxy)."""
+    """proxy из config.toml → (proxy, connection, описание) для TelegramClient.
+
+    Не задан или 'direct'/'none'/'off' — напрямую; 'auto' — автопоиск (переменные
+    окружения, затем настройки ОС), без находки — напрямую; иначе URL прокси
+    (см. proxy_spec). Описание — для вывода используемого метода подключения."""
+    if configured:
+        configured = configured.strip()
     if not configured:
-        return proxy_spec(system_proxy())
-    if configured.strip().lower() in ("direct", "none", "off"):
-        return None
-    return proxy_spec(configured)
+        return None, None, "напрямую (proxy в config.toml не задан)"
+    if configured.lower() in ("direct", "none", "off"):
+        return None, None, "напрямую (proxy = direct)"
+    if configured.lower() == "auto":
+        for url, source in system_proxies():
+            try:
+                proxy, connection = proxy_spec(url)
+            except ToolError:
+                continue  # значение из окружения или ОС не разобрано — пробуем следующее
+            return proxy, connection, f"через прокси {mask_credentials(url)} (автопоиск: {source})"
+        return None, None, "напрямую (автопоиск: прокси не найден)"
+    proxy, connection = proxy_spec(configured)
+    kind = "MTProto-прокси" if connection else "прокси"
+    return proxy, connection, f"через {kind} {mask_credentials(configured)} (из config.toml)"
+
+
+_reported = False
+
+
+def report_connection(note):
+    """Один раз на процесс сообщить в stderr, как сервер подключается к Telegram."""
+    global _reported
+    if not _reported:
+        print(f"Telegram: подключаюсь {note}", file=sys.stderr)
+        _reported = True
 
 
 @asynccontextmanager
@@ -124,17 +184,25 @@ async def telegram(login=False):
             except OSError:  # BlockingIOError (POSIX) / PermissionError (Windows): занято
                 raise ToolError("Telegram занят другой сессией, повтори позже") from None
             api_id, api_hash, configured_proxy = load_config()
+            proxy, connection, note = resolve_proxy(configured_proxy)
+            report_connection(note)
             # Longer FloodWaits are raised, so a call never sleeps past its time budget.
-            client = TelegramClient(
-                str(SESSION), api_id, api_hash, flood_sleep_threshold=30,
-                proxy=resolve_proxy(configured_proxy),
-            )
+            kwargs = {"proxy": proxy}
+            if connection:  # MTProto-прокси: класс соединения и кортеж (хост, порт, секрет)
+                kwargs["connection"] = connection
+            client = TelegramClient(str(SESSION), api_id, api_hash, flood_sleep_threshold=30, **kwargs)
             try:
                 await client.connect()
                 if not login and not await client.is_user_authorized():
                     raise ToolError("Нет входа в Telegram: выполни `uv run python -m tgc.login`")
                 yield client
-            except (RPCError, ConnectionError) as e:  # MCP hides the text of other exceptions from Claude
+            except ConnectionError as e:
+                if proxy:  # прокси не сработал — прямое подключение могло работать
+                    raise ToolError(
+                        f"Telegram {note}: {e}. Если прокси не нужен — proxy = \"direct\" в config.toml"
+                    ) from e
+                raise ToolError(f"Telegram: {e}") from e
+            except RPCError as e:  # MCP hides the text of other exceptions from Claude
                 raise ToolError(f"Telegram: {e}") from e
             finally:
                 await client.disconnect()

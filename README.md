@@ -307,17 +307,17 @@ Change only this setting in the debug menu: other options can break the app or d
 
 ## Proxy
 
-If Telegram is not reachable directly, the server can connect through a proxy. With no settings it connects directly.
+By default the server connects to Telegram directly. If Telegram is only reachable through a proxy, set it in `~/.tgc/config.toml`:
 
-- **Automatic.** The server takes the proxy from the OS: the `http_proxy`/`https_proxy` environment variables, or the system proxy settings — Windows: Internet options, macOS: System Settings → Network → Proxies. Nothing to configure.
-- **Explicit.** Add a line to `~/.tgc/config.toml`:
+```toml
+proxy = "socks5://127.0.0.1:1080"
+```
 
-  ```toml
-  proxy = "socks5://127.0.0.1:1080"
-  ```
+- **Explicit proxy.** Schemes: `socks5://`, `socks4://`, `http://`, `https://` (used as HTTP CONNECT), and a Telegram MTProto proxy: `mtproto://host:port/secret`. The scheme is optional: `127.0.0.1:1080` means `https://127.0.0.1:1080`. Login and password go in the URL: `socks5://user:pass@host:port`. The characters `@`, `:` and `/` in a login or password are written as `%40`, `%3A` and `%2F`.
+- **`proxy = "auto"`** — let the server find the proxy: the `http_proxy`/`https_proxy` environment variables, then the OS settings — Windows: Internet options, macOS: System Settings → Network → Proxies. Nothing found — connect directly.
+- **`proxy = "direct"`** — connect directly, the same as removing the line.
 
-  Supported schemes: `socks5://`, `socks4://`, `http://`, with an optional login and password: `socks5://user:pass@host:port`. The characters `@`, `:` and `/` in a login or password are written as `%40`, `%3A` and `%2F`.
-- **Disabled.** `proxy = "direct"` connects directly even when the OS has a proxy configured.
+At startup the server writes the connection method to its log, for example: `Telegram: подключаюсь напрямую (proxy в config.toml не задан)` or `Telegram: подключаюсь через прокси socks5://127.0.0.1:1080 (из config.toml)`.
 
 ## Limits and risks
 

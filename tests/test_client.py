@@ -8,7 +8,7 @@ import pytest
 from mcp.server.mcpserver.exceptions import ToolError
 from telethon.tl.types import PeerUser, User
 
-from tgc.client import proxy_spec, resolve, resolve_proxy, system_proxy
+from tgc.client import proxy_spec, resolve, resolve_proxy, system_proxies
 
 ANNA = User(id=1, first_name="Анна")
 ANNA_S = User(id=2, first_name="Анна", last_name="Смирнова")
@@ -43,13 +43,13 @@ def test_resolve_by_name():
 
 
 def test_proxy_spec_parses_url():
-    assert proxy_spec("socks5://127.0.0.1:12334") == {
-        "proxy_type": "socks5", "addr": "127.0.0.1", "port": 12334, "rdns": True,
-    }
+    assert proxy_spec("socks5://127.0.0.1:12334") == (
+        {"proxy_type": "socks5", "addr": "127.0.0.1", "port": 12334, "rdns": True}, None,
+    )
 
 
 def test_proxy_spec_with_credentials():
-    spec = proxy_spec("http://user:pass@127.0.0.1:8080")
+    spec, _ = proxy_spec("http://user:pass@127.0.0.1:8080")
     assert spec["proxy_type"] == "http" and spec["username"] == "user" and spec["password"] == "pass"
 
 
@@ -59,70 +59,130 @@ def test_proxy_spec_rejects_unknown_scheme():
 
 
 def test_proxy_spec_none_when_unset():
-    assert proxy_spec(None) is None
+    assert proxy_spec(None) == (None, None)
 
 
 def test_proxy_spec_socks_means_socks5():
-    assert proxy_spec("socks://127.0.0.1:1080")["proxy_type"] == "socks5"
+    assert proxy_spec("socks://127.0.0.1:1080")[0]["proxy_type"] == "socks5"
 
 
-def test_resolve_proxy_explicit_config_wins(monkeypatch):
-    monkeypatch.setattr("tgc.client.system_proxy", lambda: "http://system:1")
-    assert resolve_proxy("socks5://config:2")["addr"] == "config"
+def test_proxy_spec_schemeless_means_https_connect():
+    spec, _ = proxy_spec("127.0.0.1:8080")
+    assert spec["proxy_type"] == "http" and spec["addr"] == "127.0.0.1" and spec["port"] == 8080
+
+
+def test_proxy_spec_https_is_http_connect():
+    assert proxy_spec("https://proxy:3128")[0]["proxy_type"] == "http"
+
+
+def test_proxy_spec_mtproto():
+    from telethon.network.connection import ConnectionTcpMTProxyAbridged
+    assert proxy_spec("mtproto://127.0.0.1:443/ee1603dddeadbeef") == (
+        ("127.0.0.1", 443, "ee1603dddeadbeef"), ConnectionTcpMTProxyAbridged,
+    )
+
+
+def test_proxy_spec_mtproto_secret_in_query():
+    proxy, _ = proxy_spec("mtproto://127.0.0.1:443?secret=abc123")
+    assert proxy == ("127.0.0.1", 443, "abc123")
+
+
+def test_proxy_spec_mtproto_requires_secret():
+    with pytest.raises(ToolError, match="mtproto"):
+        proxy_spec("mtproto://127.0.0.1:443")
+
+
+def test_resolve_proxy_unset_is_direct_even_with_system_proxy(monkeypatch):
+    monkeypatch.setattr("tgc.client.system_proxies", lambda: [("http://system:1", "настройки прокси ОС")])
+    assert resolve_proxy(None) == (None, None, "напрямую (proxy в config.toml не задан)")
 
 
 def test_resolve_proxy_direct_disables_system_proxy(monkeypatch):
-    monkeypatch.setattr("tgc.client.system_proxy", lambda: "http://system:1")
-    assert resolve_proxy("direct") is None
-    assert resolve_proxy("none") is None
+    monkeypatch.setattr("tgc.client.system_proxies", lambda: [("http://system:1", "настройки прокси ОС")])
+    assert resolve_proxy("direct")[:2] == (None, None)
+    assert resolve_proxy("none")[:2] == (None, None)
 
 
-def test_resolve_proxy_falls_back_to_system(monkeypatch):
-    monkeypatch.setattr("tgc.client.system_proxy", lambda: "http://system:1")
-    assert resolve_proxy(None)["addr"] == "system"
+def test_resolve_proxy_auto_uses_system_proxy(monkeypatch):
+    monkeypatch.setattr("tgc.client.system_proxies", lambda: [("http://system:1", "настройки прокси ОС")])
+    proxy, connection, note = resolve_proxy("auto")
+    assert proxy["addr"] == "system" and connection is None and "автопоиск" in note
 
 
-def test_system_proxy_env_vars_first(monkeypatch):
+def test_resolve_proxy_auto_skips_unparseable_values(monkeypatch):
+    monkeypatch.setattr("tgc.client.system_proxies", lambda: [
+        ("::плохое значение::", "переменная окружения https_proxy"),
+        ("socks5://os:1080", "настройки прокси ОС"),
+    ])
+    proxy, _, note = resolve_proxy("auto")
+    assert proxy["addr"] == "os" and "настройки прокси ОС" in note
+
+
+def test_resolve_proxy_auto_without_findings_is_direct(monkeypatch):
+    monkeypatch.setattr("tgc.client.system_proxies", lambda: [])
+    assert resolve_proxy("auto") == (None, None, "напрямую (автопоиск: прокси не найден)")
+
+
+def test_resolve_proxy_explicit_config():
+    proxy, connection, note = resolve_proxy("socks5://config:2")
+    assert proxy["addr"] == "config" and connection is None and "config.toml" in note
+
+
+def test_resolve_proxy_masks_password_in_note():
+    _, _, note = resolve_proxy("socks5://user:secret@127.0.0.1:1080")
+    assert "secret" not in note and "user:***@" in note
+
+
+def test_report_connection_once_per_process(capsys, monkeypatch):
+    import tgc.client
+    monkeypatch.setattr(tgc.client, "_reported", False)
+    tgc.client.report_connection("напрямую")
+    tgc.client.report_connection("через прокси")
+    err = capsys.readouterr().err
+    assert "напрямую" in err and err.count("Telegram") == 1
+
+
+def test_system_proxies_env_vars_first(monkeypatch):
     monkeypatch.setattr(urllib.request, "getproxies_environment",
                         lambda: {"no": "localhost", "https": "http://env:3"})
-    assert system_proxy() == "http://env:3"
+    assert system_proxies() == [("http://env:3", "переменная окружения https_proxy")]
 
 
-def test_system_proxy_registry_checked_despite_no_proxy(monkeypatch):
-    # только no_proxy в окружении: getproxies() на этом останавливается, system_proxy — нет
+def test_system_proxies_registry_checked_despite_no_proxy(monkeypatch):
+    # только no_proxy в окружении: getproxies() на этом останавливается, system_proxies — нет
     monkeypatch.setattr(urllib.request, "getproxies_environment", lambda: {"no": "localhost"})
     monkeypatch.setattr(urllib.request, "getproxies_registry",
                         lambda: {"http": "http://reg:4", "https": "http://reg:4"}, raising=False)
     monkeypatch.setattr(os, "name", "nt")
     monkeypatch.setattr(sys, "platform", "win32")
-    assert system_proxy() == "http://reg:4"
+    assert system_proxies() == [("http://reg:4", "настройки прокси ОС")]
 
 
-def test_system_proxy_macos_sysconf(monkeypatch):
+def test_system_proxies_macos_sysconf(monkeypatch):
     # macOS: системный прокси из System Configuration (Network → Proxies)
     monkeypatch.setattr(urllib.request, "getproxies_environment", lambda: {})
     monkeypatch.setattr(urllib.request, "getproxies_macosx_sysconf",
                         lambda: {"https": "http://mac:6152"}, raising=False)
     monkeypatch.setattr(os, "name", "posix")
     monkeypatch.setattr(sys, "platform", "darwin")
-    assert system_proxy() == "http://mac:6152"
+    assert system_proxies() == [("http://mac:6152", "настройки прокси ОС")]
 
 
-def test_system_proxy_macos_socks_only(monkeypatch):
+def test_system_proxies_macos_socks_only(monkeypatch):
     # macOS: включён только SOCKS-прокси — _scproxy отдаёт его как http://host:port
     monkeypatch.setattr(urllib.request, "getproxies_environment", lambda: {})
     monkeypatch.setattr(urllib.request, "getproxies_macosx_sysconf",
                         lambda: {"socks": "http://127.0.0.1:1080"}, raising=False)
     monkeypatch.setattr(os, "name", "posix")
     monkeypatch.setattr(sys, "platform", "darwin")
-    assert system_proxy() == "socks5://127.0.0.1:1080"
+    assert system_proxies() == [("socks5://127.0.0.1:1080", "настройки прокси ОС (SOCKS)")]
 
 
-def test_system_proxy_none_when_nowhere(monkeypatch):
+def test_system_proxies_none_when_nowhere(monkeypatch):
     monkeypatch.setattr(urllib.request, "getproxies_environment", lambda: {})
     monkeypatch.setattr(os, "name", "posix")
     monkeypatch.setattr(sys, "platform", "linux")
-    assert system_proxy() is None
+    assert system_proxies() == []
 
 
 def test_parallel_calls_queue_instead_of_busy(tmp_path, monkeypatch):
@@ -151,5 +211,5 @@ def test_parallel_calls_queue_instead_of_busy(tmp_path, monkeypatch):
 
 def test_proxy_spec_decodes_percent_escapes():
     # «@» and «:» in a login or password must be written as %40 and %3A in the URL
-    spec = proxy_spec("socks5://us%3Aer:p%40ss@127.0.0.1:1080")
+    spec, _ = proxy_spec("socks5://us%3Aer:p%40ss@127.0.0.1:1080")
     assert spec["username"] == "us:er" and spec["password"] == "p@ss"
