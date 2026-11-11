@@ -15,6 +15,7 @@ The server runs on your machine and connects to Telegram as you, over the offici
 - [Installation](#installation)
 - [Permissions](#permissions)
 - [Choosing a chat](#choosing-a-chat)
+- [Forum topics](#forum-topics)
 - [Proxy](#proxy)
 - [Limits and risks](#limits-and-risks)
 - [Development](#development)
@@ -307,6 +308,15 @@ You can name a chat by part of its title, but Telegram search does not find ever
 To see ids in Telegram itself, turn them on in the debug menu. In Telegram Desktop, open **Settings → Advanced → Experimental settings** and turn on **Show Peer IDs in Profile**. For other platforms, see the [tginfo guide](https://tginfo.me/open-debug-menu/) (in Russian).
 
 Change only this setting in the debug menu: other options can break the app or delete secret chats.
+
+## Forum topics
+
+Some supergroups are forums: the chat is split into topics. `list_topics` shows them with their ids.
+
+- To read one topic, the agent calls `sync_chat` with `topic` — a topic id or part of its title, named the same way as a chat. Example: "What did they answer about GPT Model Hub this week?" → `sync_chat` with `days=7` and `topic="GPT Model Hub"`.
+- A topic is saved to its own folder inside the chat's folder: `archive/<chat>/<topic>__<id>/`. A topic sync never touches the chat's own files.
+- `transcribe`, `ocr_photos`, `read_files`, `fetch_media`, `fetch_large_file` and `describe_media` take the same `topic` when they work with topic messages, so voice, photos and files land in the topic's folder.
+- Without `topic` the whole forum is saved, all topics mixed in the chat's own files.
 
 ## Proxy
 
