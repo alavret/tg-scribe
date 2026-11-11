@@ -25,7 +25,8 @@ The server runs on your machine and connects to Telegram as you, over the offici
 | Tool | What it does |
 |---|---|
 | `list_dialogs` | Shows the 50 most recent chats with their folders. Finds any other chat by name; `folder` leaves only the chats of one folder |
-| `sync_chat` | Saves a chat to the archive: the last N days or the whole history. Later calls add new messages |
+| `list_topics` | Shows the topics of a forum chat: id and title |
+| `sync_chat` | Saves a chat to the archive: the last N days or the whole history. Later calls add new messages. `topic` saves only one forum topic |
 | `transcribe` | Transcribes voice and video messages. Needs Telegram Premium |
 | `ocr_photos` | Reads text on photos with Apple Vision, locally on your Mac |
 | `read_files` | Reads the text of txt, md, csv, html, pdf, doc, docx, rtf, xlsx, pptx and image files locally on your Mac, including scanned PDFs, and saves it to `text/<id>.txt` in the chat folder |
@@ -49,6 +50,8 @@ Voice messages, photos and files from older history are not processed while load
 ## Archive
 
 Chats are stored in the `archive/` folder next to the MCP source code, one file per month. The text of read files is in the `text/` subfolder of each chat. The folder is in `.gitignore`.
+
+A forum topic saved with `topic` lives in its own folder inside the chat's folder: `archive/<chat>/<topic>__<topic_id>/2026-10.md`.
 
 ```
 archive/Ivan-Petrov__123456789/2026-10.md

@@ -50,6 +50,17 @@ def chat_dir(root: Path, chat_id: int, title: str) -> Path:
     return path
 
 
+def topic_dir(root: Path, chat_id: int, chat_title: str, topic_id: int, topic_title: str) -> Path:
+    """Папка топика внутри папки чата; как и чат, находится по id, а не по названию."""
+    chat = chat_dir(root, chat_id, chat_title)
+    found = sorted(chat.glob(f"*__{topic_id}"))
+    if found:
+        return found[0]
+    path = chat / f"{re.sub(r'[^\w.-]+', '-', topic_title).strip('-')[:60] or 'topic'}__{topic_id}"
+    path.mkdir(parents=True)
+    return path
+
+
 def month_files(path: Path):
     return sorted(path.glob("????-??.md"))
 
@@ -404,10 +415,10 @@ async def read_media(client, msg, path):
     return f"{info}, с текстом", []
 
 
-async def process_media(client, entity, kind, ids=None, root=ARCHIVE):
+async def process_media(client, entity, kind, ids=None, root=ARCHIVE, topic=None):
     start = time.monotonic()
     tool, what = ("ocr_photos", "фото") if kind == "фото" else ("read_files", "файлов")
-    path = chat_dir(root, get_peer_id(entity), get_display_name(entity))
+    path = topic_dir(root, get_peer_id(entity), get_display_name(entity), *topic) if topic else chat_dir(root, get_peer_id(entity), get_display_name(entity))
     pending = pending_ids(path, kind)
     # Already processed ones are skipped: processing again would duplicate the text lines.
     ids = [i for i in ids if i in pending] if ids else pending
@@ -441,12 +452,12 @@ async def process_media(client, entity, kind, ids=None, root=ARCHIVE):
     return f"{status}: обработано {done}, ошибок {failed}, осталось необработанных {what} {left}. Папка: {path}"
 
 
-async def ocr_photos(client, entity, ids=None, root=ARCHIVE):
-    return await process_media(client, entity, "фото", ids, root)
+async def ocr_photos(client, entity, ids=None, root=ARCHIVE, topic=None):
+    return await process_media(client, entity, "фото", ids, root, topic)
 
 
-async def read_files(client, entity, ids=None, root=ARCHIVE):
-    return await process_media(client, entity, "файл", ids, root)
+async def read_files(client, entity, ids=None, root=ARCHIVE, topic=None):
+    return await process_media(client, entity, "файл", ids, root, topic)
 
 
 def media_file(folder: Path, msg) -> Path:
@@ -473,11 +484,12 @@ async def download_large(client, msg, folder: Path) -> str:
     return f"#{msg.id}: {dest}"
 
 
-async def sync_chat(client, entity, days=None, root=ARCHIVE):
+async def sync_chat(client, entity, days=None, topic=None, root=ARCHIVE):
     """New messages first, then older history down to the target depth, newest first:
-    an interrupted load leaves a gap-free archive that ends at the present."""
+    an interrupted load leaves a gap-free archive that ends at the present.
+    topic — (id, название) топика форума: выгружаются только его сообщения, в папку топика."""
     start = time.monotonic()
-    path = chat_dir(root, get_peer_id(entity), get_display_name(entity))
+    path = topic_dir(root, get_peer_id(entity), get_display_name(entity), *topic) if topic else chat_dir(root, get_peer_id(entity), get_display_name(entity))
     first_id, last_id = id_range(path)
     # The depth (unix time, 0 = the whole history) is kept on disk: a big load spans several calls.
     depth = path / ".depth"
@@ -506,7 +518,7 @@ async def sync_chat(client, entity, days=None, root=ARCHIVE):
     try:
         if last_id:
             try:
-                async for msg in client.iter_messages(entity, min_id=last_id, reverse=True, wait_time=1):
+                async for msg in client.iter_messages(entity, min_id=last_id, reply_to=topic[0] if topic else None, reverse=True, wait_time=1):
                     if isinstance(msg, MessageService):
                         continue
                     transcript = None
@@ -543,7 +555,7 @@ async def sync_chat(client, entity, days=None, root=ARCHIVE):
         if target is not None:
             # Old history is not transcribed, OCR'd or read: that is done lazily, when a task needs it.
             try:
-                async for msg in client.iter_messages(entity, max_id=first_id, wait_time=1):
+                async for msg in client.iter_messages(entity, max_id=first_id, reply_to=topic[0] if topic else None, wait_time=1):
                     if msg.date.timestamp() < target:
                         break
                     if isinstance(msg, MessageService):

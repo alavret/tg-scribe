@@ -12,6 +12,7 @@ from telethon import TelegramClient
 from telethon.errors import RPCError
 from telethon.network.connection import ConnectionTcpMTProxyAbridged
 from telethon.tl.functions.contacts import SearchRequest
+from telethon.tl.functions.messages import GetForumTopicsByIDRequest, GetForumTopicsRequest
 from telethon.utils import get_display_name, get_peer_id
 
 CONF_DIR = Path.home() / ".tgc"
@@ -239,3 +240,37 @@ async def search(client, query: str):
     r = await client(SearchRequest(q=query, limit=50))
     by_id = {get_peer_id(e): e for e in r.users + r.chats}
     return [by_id[get_peer_id(p)] for p in r.my_results if get_peer_id(p) in by_id]
+
+
+async def topics(client, entity) -> list[tuple[int, str]]:
+    """Топики форума: (id, название), постранично."""
+    out, seen, offset = [], set(), 0
+    while True:
+        r = await client(GetForumTopicsRequest(peer=entity, offset_date=0, offset_id=0, offset_topic=offset, limit=100))
+        fresh = [(t.id, t.title) for t in r.topics if hasattr(t, "title") and t.id not in seen]
+        if not fresh:
+            return out
+        out += fresh
+        seen |= {i for i, _ in fresh}
+        offset = fresh[-1][0]
+
+
+async def resolve_topic(client, entity, topic: str):
+    """Топик форума по id или части названия -> (id, название)."""
+    if not getattr(entity, "forum", False):
+        raise ToolError(f"«{get_display_name(entity)}» — не форум, топиков нет")
+    if topic.lstrip("-").isdigit():
+        want = int(topic)
+        r = await client(GetForumTopicsByIDRequest(peer=entity, topics=[want]))
+        for t in r.topics:
+            if getattr(t, "id", None) == want and hasattr(t, "title"):
+                return want, t.title
+        raise ToolError(f"Топик #{want} не найден, вызови list_topics")
+    found = await topics(client, entity)
+    matches = [ft for ft in found if topic.lower() in ft[1].lower()]
+    exact = [ft for ft in matches if ft[1].lower() == topic.lower()] or matches
+    if len(exact) == 1:
+        return exact[0]
+    if not exact:
+        raise ToolError(f"Топик «{topic}» не найден. Топики:\n" + "\n".join(f"{i}\t{t}" for i, t in found))
+    raise ToolError(f"Под «{topic}» подходит несколько топиков, укажи id:\n" + "\n".join(f"{i}\t{t}" for i, t in exact[:20]))

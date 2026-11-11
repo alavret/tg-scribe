@@ -10,9 +10,9 @@ from mcp.types import ToolAnnotations
 
 from tgc.archive import (
     ARCHIVE, MAX_FILE, chat_dir, describe, download_large, is_file, is_voice, media_file, ocr_photos as ocr, read_files as read, set_media, size_str,
-    sync_chat as sync, transcribe_one, update_block,
+    sync_chat as sync, topic_dir, transcribe_one, update_block,
 )
-from tgc.client import resolve, search, telegram
+from tgc.client import resolve, resolve_topic, search, telegram, topics
 
 READ = ToolAnnotations(read_only_hint=True)  # Hermes: read-only tools run without approval
 
@@ -28,6 +28,9 @@ INSTRUCTIONS = f"""Telegram пользователя: его личные чат
   старые — только если нужно для задачи. Если sync_chat ответил «не всё загружено», вызови снова.
 - Глубину выбирай по задаче: «на прошлой неделе» — days=14. Без days новый чат выгружается целиком,
   а это часы для чата на миллион сообщений. Нужно глубже, чем в архиве, — вызови sync_chat с большим days.
+- Топики форума: список — list_topics. sync_chat с topic (id или часть названия) выгружает только этот топик
+  в <чат>/<топик>__<id>/. Если сообщения из топика, такой же topic указывают transcribe, ocr_photos, read_files,
+  fetch_media, fetch_large_file и describe_media.
 - Голосовое с меткой «не расшифровано», важное для задачи, — расшифруй через transcribe.
 - Фото: [фото] — не обработано, [фото, с текстом] — ниже строки «[на фото] …» с распознанным текстом,
   [фото, без текста], [фото: описание], [фото, с текстом: описание] — описание, [фото, недоступно] — удалено, [фото, не читается] — файл битый.
@@ -111,20 +114,36 @@ def kind(entity):
 
 
 @mcp.tool(annotations=READ)
-async def sync_chat(chat: str, days: int | None = None) -> str:
-    """Догружает новые сообщения чата в локальный архив. chat — id, @username или часть названия.
-    days — сколько последних дней истории должно быть в архиве; недостающие старые сообщения догружаются.
-    Без days новый чат выгружается целиком, а у загруженного догружаются только новые сообщения."""
+async def list_topics(chat: str) -> str:
+    """Топики форума: id и название. Не для форума — топиков нет, сообщения выгружаются целиком.
+    topic в sync_chat и других инструментах — id топика или часть названия."""
     async with telegram() as client:
-        return await sync(client, await resolve(client, chat), days)
+        entity = await resolve(client, chat)
+        if not getattr(entity, "forum", False):
+            return f"«{get_display_name(entity)}» — не форум: топиков нет, сообщения выгружаются целиком"
+        rows = await topics(client, entity)
+    return "id\tназвание\n" + ("\n".join(f"{i}\t{t}" for i, t in rows) or "топиков нет")
 
 
 @mcp.tool(annotations=READ)
-async def transcribe(chat: str, ids: list[int]) -> str:
-    """Расшифровывает голосовые и кружки с указанными id и вписывает текст в архив."""
+async def sync_chat(chat: str, days: int | None = None, topic: str | None = None) -> str:
+    """Догружает новые сообщения чата в локальный архив. chat — id, @username или часть названия.
+    days — сколько последних дней истории должно быть в архиве; недостающие старые сообщения догружаются.
+    Без days новый чат выгружается целиком, а у загруженного догружаются только новые сообщения.
+    topic — выгрузить только этот топик форума (id или часть названия; список — list_topics)."""
     async with telegram() as client:
         entity = await resolve(client, chat)
-        path = chat_dir(ARCHIVE, get_peer_id(entity), get_display_name(entity))
+        ft = await resolve_topic(client, entity, topic) if topic else None
+        return await sync(client, entity, days, topic=ft)
+
+
+@mcp.tool(annotations=READ)
+async def transcribe(chat: str, ids: list[int], topic: str | None = None) -> str:
+    """Расшифровывает голосовые и кружки с указанными id и вписывает текст в архив.
+    topic — топик форума (id или часть названия), если сообщения из топика."""
+    async with telegram() as client:
+        entity = await resolve(client, chat)
+        path = topic_dir(ARCHIVE, get_peer_id(entity), get_display_name(entity), *await resolve_topic(client, entity, topic)) if topic else chat_dir(ARCHIVE, get_peer_id(entity), get_display_name(entity))
         out = []
         for msg_id, msg in zip(ids, await client.get_messages(entity, ids=ids)):
             if not msg or not is_voice(msg):
@@ -140,27 +159,34 @@ async def transcribe(chat: str, ids: list[int]) -> str:
 
 
 @mcp.tool(annotations=READ)
-async def ocr_photos(chat: str, ids: list[int] | None = None) -> str:
-    """Распознаёт текст на фото (Apple Vision) и вписывает его в архив. Без ids — все необработанные фото чата."""
-    async with telegram() as client:
-        return await ocr(client, await resolve(client, chat), ids)
-
-
-@mcp.tool(annotations=READ)
-async def read_files(chat: str, ids: list[int] | None = None) -> str:
-    """Читает текст файлов txt, md, csv, html, pdf, doc, docx, rtf, xlsx, pptx и картинок локально, без скачивания на диск
-    (сканы PDF распознаются), и сохраняет его в text/<id>.txt в папке чата. Без ids — все непрочитанные файлы чата."""
-    async with telegram() as client:
-        return await read(client, await resolve(client, chat), ids)
-
-
-@mcp.tool(annotations=READ)
-async def fetch_media(chat: str, ids: list[int]) -> str:
-    """Скачивает фото и файлы (до 50 МБ, без видео и аудио) с указанными id в папку чата в архиве
-    и возвращает пути к ним."""
+async def ocr_photos(chat: str, ids: list[int] | None = None, topic: str | None = None) -> str:
+    """Распознаёт текст на фото (Apple Vision) и вписывает его в архив. Без ids — все необработанные фото чата.
+    topic — топик форума (id или часть названия), если фото из топика."""
     async with telegram() as client:
         entity = await resolve(client, chat)
-        media = chat_dir(ARCHIVE, get_peer_id(entity), get_display_name(entity)) / "media"
+        ft = await resolve_topic(client, entity, topic) if topic else None
+        return await ocr(client, entity, ids, topic=ft)
+
+
+@mcp.tool(annotations=READ)
+async def read_files(chat: str, ids: list[int] | None = None, topic: str | None = None) -> str:
+    """Читает текст файлов txt, md, csv, html, pdf, doc, docx, rtf, xlsx, pptx и картинок локально, без скачивания на диск
+    (сканы PDF распознаются), и сохраняет его в text/<id>.txt в папке чата. Без ids — все непрочитанные файлы чата.
+    topic — топик форума (id или часть названия), если файлы из топика."""
+    async with telegram() as client:
+        entity = await resolve(client, chat)
+        ft = await resolve_topic(client, entity, topic) if topic else None
+        return await read(client, entity, ids, topic=ft)
+
+
+@mcp.tool(annotations=READ)
+async def fetch_media(chat: str, ids: list[int], topic: str | None = None) -> str:
+    """Скачивает фото и файлы (до 50 МБ, без видео и аудио) с указанными id в папку чата в архиве
+    и возвращает пути к ним. topic — топик форума (id или часть названия), если сообщения из топика."""
+    async with telegram() as client:
+        entity = await resolve(client, chat)
+        base = topic_dir(ARCHIVE, get_peer_id(entity), get_display_name(entity), *await resolve_topic(client, entity, topic)) if topic else chat_dir(ARCHIVE, get_peer_id(entity), get_display_name(entity))
+        media = base / "media"
         media.mkdir(exist_ok=True)
         out = []
         for msg_id, msg in zip(ids, await client.get_messages(entity, ids=ids)):
@@ -175,26 +201,29 @@ async def fetch_media(chat: str, ids: list[int]) -> str:
 
 
 @mcp.tool()
-async def fetch_large_file(chat: str, id: int) -> str:
+async def fetch_large_file(chat: str, id: int, topic: str | None = None) -> str:
     """Скачивает файл больше 50 МБ (без видео и аудио) в папку чата в архиве и возвращает путь.
-    Только после того, как пользователь согласился. Файл качается частями: если ответ «вызови ещё раз» — повтори."""
+    Только после того, как пользователь согласился. Файл качается частями: если ответ «вызови ещё раз» — повтори.
+    topic — топик форума (id или часть названия), если файл из топика."""
     async with telegram() as client:
         entity = await resolve(client, chat)
         msg = await client.get_messages(entity, ids=id)
         if not msg or not is_file(msg):
             return f"#{id}: не файл"
-        media = chat_dir(ARCHIVE, get_peer_id(entity), get_display_name(entity)) / "media"
+        base = topic_dir(ARCHIVE, get_peer_id(entity), get_display_name(entity), *await resolve_topic(client, entity, topic)) if topic else chat_dir(ARCHIVE, get_peer_id(entity), get_display_name(entity))
+        media = base / "media"
         media.mkdir(exist_ok=True)
         return await download_large(client, msg, media)
 
 
 @mcp.tool(annotations=READ)
-async def describe_media(chat: str, id: int, text: str) -> str:
-    """Сохраняет в архив короткое описание фото или файла (до 200 символов, одна строка)."""
+async def describe_media(chat: str, id: int, text: str, topic: str | None = None) -> str:
+    """Сохраняет в архив короткое описание фото или файла (до 200 символов, одна строка).
+    topic — топик форума (id или часть названия), если сообщение из топика."""
     desc = " ".join(text.split()).replace("]", ")")[:200]
     async with telegram() as client:  # the lock also covers the write: a parallel sync_chat appends to the same file
         entity = await resolve(client, chat)
-        path = chat_dir(ARCHIVE, get_peer_id(entity), get_display_name(entity))
+        path = topic_dir(ARCHIVE, get_peer_id(entity), get_display_name(entity), *await resolve_topic(client, entity, topic)) if topic else chat_dir(ARCHIVE, get_peer_id(entity), get_display_name(entity))
         try:
             if not update_block(path, id, lambda b: set_media(b, f": {desc}")):
                 return f"#{id} нет в архиве, сначала sync_chat"
